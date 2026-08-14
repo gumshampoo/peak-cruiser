@@ -195,6 +195,21 @@
       <span>日本の範囲だけ描画</span>
     </label>
   </div>
+  <hr style="border:none; border-top:1px solid rgba(255,255,255,0.2); margin:12px 0 10px;">
+  <div class="row">
+    <label><span>FPS上限</span><span id="v_fpsCap"></span></label>
+    <input type="range" id="s_fpsCap" min="0" max="60" step="5">
+  </div>
+  <div class="row">
+    <label><span>操作の慣性</span><span id="v_inputSmoothing"></span></label>
+    <input type="range" id="s_inputSmoothing" min="0" max="0.4" step="0.01">
+  </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_pauseWhenUnfocused" style="width:auto;">
+      <span>非アクティブ時は停止</span>
+    </label>
+  </div>
   <div class="row">
     <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
       <input type="checkbox" id="c_sunLighting" style="width:auto;">
@@ -985,9 +1000,32 @@ setInterval(() => {
     // something stops the ray meaningfully short of that, with the
     // tolerance scaling by range since far tiles are coarser.
     const hitDist = Cesium.Cartesian3.distance(camPos, hit);
-    peak.occluded = hitDist < distance - Math.max(300, distance * 0.02);
+    const nowOccluded = hitDist < distance - Math.max(300, distance * 0.02);
+    // This runs on its own timer, so a change here has to tell the render
+    // loop to redraw the overlays -- otherwise a label could appear or
+    // vanish while the camera is parked and nothing would repaint.
+    if (nowOccluded !== peak.occluded) overlayDirty = true;
+    peak.occluded = nowOccluded;
   }
 }, OCCLUSION_INTERVAL);
+
+// Cosine of the half-angle of a cone that contains the whole frustum, with a
+// margin so a label whose anchor is just off-screen (but whose slanted text
+// still reaches into view) isn't dropped. Recomputed on resize, since the
+// horizontal extent depends on the aspect ratio.
+let viewConeCos = -1;
+function updateViewCone() {
+  const f = viewer.camera.frustum;
+  const fov = f.fov || Cesium.Math.toRadians(60);
+  const aspect = f.aspectRatio || (viewer.canvas.clientWidth / Math.max(1, viewer.canvas.clientHeight));
+  // Cesium applies `fov` to whichever screen dimension is larger.
+  const tanX = aspect >= 1 ? Math.tan(fov / 2) : Math.tan(fov / 2) * aspect;
+  const tanY = aspect >= 1 ? Math.tan(fov / 2) / aspect : Math.tan(fov / 2);
+  const halfDiagonal = Math.atan(Math.hypot(tanX, tanY));
+  viewConeCos = Math.cos(Math.min(Math.PI / 2, halfDiagonal + Cesium.Math.toRadians(8)));
+}
+updateViewCone();
+window.addEventListener('resize', updateViewCone);
 
 function updatePeakLabels() {
   const canvas = viewer.canvas;
@@ -1008,12 +1046,14 @@ function updatePeakLabels() {
     // Beyond the combined horizon the peak is behind the earth's curve.
     if (distance > camHorizon + horizonDistance(peak.elev)) continue;
 
-    // Only project peaks that are actually in front of the camera (a peak
-    // behind the camera can still mathematically project to an in-bounds
-    // window coordinate -- worldToWindowCoordinates doesn't know "behind"
-    // from "in front" on its own).
+    // Reject anything outside the view cone before paying for a projection.
+    // "In front of the camera" (dot > 0) is a half-space test and lets
+    // through everything in a 180-degree arc, so most of what survived it
+    // was still projected only to be thrown away on the screen-bounds check
+    // below. Comparing against the frustum's own half-angle instead cuts the
+    // number of projections by roughly five times.
     const dot = Cesium.Cartesian3.dot(Cesium.Cartesian3.normalize(toPeak, new Cesium.Cartesian3()), forward);
-    if (dot <= 0) continue;
+    if (dot <= viewConeCos) continue;
     const win = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, peak.pos);
     if (!win || win.x < 0 || win.x > cw || win.y < 0 || win.y > ch) continue;
 
@@ -1121,7 +1161,11 @@ function updatePeakLabels() {
 // Raw SpaceNavigator axis values arrive roughly in [-350, 350]; we normalize
 // and treat them as a flight-stick: hold to keep moving/turning, release to
 // stop -- no orbit pivot, no re-centering, so nothing "jumps".
+// sm = raw stick, straight off the device (shown in the HUD).
+// smIn = the smoothed version the camera actually flies on.
 let sm = {x:0, y:0, z:0, rx:0, ry:0, rz:0};
+let smIn = {x:0, y:0, z:0, rx:0, ry:0, rz:0};
+let dtSmoothed = 0;
 const AXIS_MAX = 350;
 
 // Explicit camera orientation state (see tick() for why: avoids gimbal-lock
@@ -1154,6 +1198,11 @@ const DEFAULTS = {
   fogDensity: 0.5,           // multiplier on Cesium's default haze; 0 = off
   sunLighting: false,        // shade terrain by real sun position
   timeOfDay: 10,             // hours, JST, used when sunLighting is on
+  // ---- v0.2: being a good neighbour to the rest of the machine ----
+  fpsCap: 30,                // hard ceiling on rendered frames/sec (0 = off)
+  pauseWhenUnfocused: true,  // stop rendering entirely in the background
+  maxTileRequests: 12,       // concurrent tile downloads
+  inputSmoothing: 0.12,      // seconds of lag on stick input (0 = raw)
 };
 let settings = { ...DEFAULTS };
 try {
@@ -1204,6 +1253,8 @@ const SLIDER_DEFS = [
   { key: 'minimapZoom', slider: 's_minimapZoom', value: 'v_minimapZoom', fmt: v => 'z' + v.toFixed(0) },
   { key: 'terrainDetail', slider: 's_terrainDetail', value: 'v_terrainDetail', fmt: v => v.toFixed(1) },
   { key: 'labelFarOpacity', slider: 's_labelFarOpacity', value: 'v_labelFarOpacity', fmt: v => Math.round(v * 100) + '%' },
+  { key: 'fpsCap', slider: 's_fpsCap', value: 'v_fpsCap', fmt: v => v === 0 ? '無制限' : v.toFixed(0) + ' fps' },
+  { key: 'inputSmoothing', slider: 's_inputSmoothing', value: 'v_inputSmoothing', fmt: v => v === 0 ? 'なし' : v.toFixed(2) + ' 秒' },
   { key: 'fogDensity', slider: 's_fogDensity', value: 'v_fogDensity', fmt: v => v === 0 ? 'なし' : v.toFixed(2) },
   { key: 'timeOfDay', slider: 's_timeOfDay', value: 'v_timeOfDay', fmt: v => {
       const hh = Math.floor(v), mm = Math.round((v - hh) * 60);
@@ -1219,6 +1270,7 @@ function refreshSettingsUI() {
   document.getElementById('c_occlusion').checked = settings.occlusionTest;
   document.getElementById('c_japanOnly').checked = settings.japanOnly;
   document.getElementById('c_sunLighting').checked = settings.sunLighting;
+  document.getElementById('c_pauseWhenUnfocused').checked = settings.pauseWhenUnfocused;
   document.getElementById('s_imagery').value = settings.imagery;
 }
 // Yes: rendering the rest of the world does cost. Looking at the horizon
@@ -1285,6 +1337,52 @@ function applyJapanOnly() {
 applyJapanOnly();
 applyFog();
 
+// ---- Being a good neighbour to the rest of the machine (v0.2).
+//
+// Everything below exists because "hold 30fps, and spend any spare capacity
+// on picture quality" is a rule that never stops consuming. It kept the GPU
+// pinned whenever the window was open, which is what made other apps drag.
+// The fix is to define what "enough" means and then stop.
+
+// Cesium runs its OWN render loop; capping our tick() would leave the actual
+// rendering untouched. targetFrameRate is the lever that throttles the
+// renderer itself, and it is where nearly all the saving comes from.
+function applyFpsCap() {
+  viewer.targetFrameRate = settings.fpsCap > 0 ? settings.fpsCap : undefined;
+}
+applyFpsCap();
+
+// Concurrent tile downloads. The default (50, six per server) is tuned to
+// saturate a connection; that competes with everything else on the machine
+// for network and disk while adding nothing once the view is full.
+function applyTileLimit() {
+  Cesium.RequestScheduler.maximumRequests = settings.maxTileRequests;
+  Cesium.RequestScheduler.maximumRequestsPerServer = Math.max(2, Math.round(settings.maxTileRequests / 3));
+}
+applyTileLimit();
+
+// Rendering to a window nobody is looking at is pure waste. Stopping the
+// render loop outright (rather than just lowering the frame rate) drops the
+// cost to nothing while the app sits in the background.
+let windowFocused = true;
+function applyFocusState() {
+  const active = windowFocused || !settings.pauseWhenUnfocused;
+  if (viewer.useDefaultRenderLoop !== active) viewer.useDefaultRenderLoop = active;
+}
+window.addEventListener('blur', () => { windowFocused = false; applyFocusState(); });
+window.addEventListener('focus', () => {
+  windowFocused = true;
+  // Reset the frame clock too: without this the whole idle gap arrives as
+  // one enormous dt and the camera lurches on the first frame back.
+  lastTime = performance.now();
+  applyFocusState();
+});
+document.addEventListener('visibilitychange', () => {
+  windowFocused = !document.hidden;
+  if (windowFocused) lastTime = performance.now();
+  applyFocusState();
+});
+
 const imagerySelect = document.getElementById('s_imagery');
 for (const o of IMAGERY_OPTIONS) {
   imagerySelect.appendChild(Object.assign(document.createElement('option'),
@@ -1308,14 +1406,19 @@ document.getElementById('c_occlusion').addEventListener('change', (e) => {
   // Turning it off must clear any stale flags, or peaks hidden at the moment
   // it was switched off would stay hidden forever.
   if (!settings.occlusionTest) for (const p of peakEntries) p.occluded = false;
+  overlayDirty = true;
 });
 for (const d of SLIDER_DEFS) {
   document.getElementById(d.slider).addEventListener('input', (e) => {
     settings[d.key] = parseFloat(e.target.value);
     document.getElementById(d.value).textContent = d.fmt(settings[d.key]);
     saveSettings();
+    // The overlays are only redrawn when the camera moves, so a setting that
+    // changes how they look has to ask for one repaint explicitly.
+    overlayDirty = true;
   });
 }
+window.addEventListener('resize', () => { overlayDirty = true; });
 document.getElementById('s_maxResolutionScale').addEventListener('input', () => {
   if (settings.minResolutionScale > settings.maxResolutionScale) {
     settings.minResolutionScale = settings.maxResolutionScale;
@@ -1339,6 +1442,12 @@ document.getElementById('s_minResolutionScale').addEventListener('input', () => 
   }
 });
 document.getElementById('s_timeOfDay').addEventListener('input', applySunLighting);
+document.getElementById('s_fpsCap').addEventListener('input', applyFpsCap);
+document.getElementById('c_pauseWhenUnfocused').addEventListener('change', (e) => {
+  settings.pauseWhenUnfocused = e.target.checked;
+  saveSettings();
+  applyFocusState();
+});
 document.getElementById('s_fogDensity').addEventListener('input', applyFog);
 document.getElementById('s_terrainDetail').addEventListener('input', () => {
   // Apply immediately rather than waiting for the adaptive loop to walk
@@ -1355,6 +1464,9 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   applyJapanOnly();
   applyFog();
   applyImagery();
+  applyFpsCap();
+  applyTileLimit();
+  applyFocusState();
   currentTerrainSSE = settings.terrainDetail;
   viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
 });
@@ -1406,6 +1518,11 @@ const FPS_TARGET = 30;   // below this, start giving up quality
 const FPS_RECOVER = 36;  // above this, start claiming it back
 let qualitySettle = 0;   // frames to ignore after a resolution change
 let idleMs = 0;          // how long the camera has been sitting still
+// Last camera state the HUD overlays were drawn for, so they can be skipped
+// entirely while nothing moves.
+const lastOverlayPos = new Cesium.Cartesian3(NaN, NaN, NaN);
+let lastOverlayYaw = NaN, lastOverlayPitch = NaN;
+let overlayDirty = true;
 
 // Single place that changes resolutionScale, so the settle window can never
 // be forgotten at one of the call sites.
@@ -1433,8 +1550,29 @@ setInterval(() => {
 
 function tick() {
   const now = performance.now();
-  const dt = Math.min((now - lastTime) / 1000, 0.1);
+  const rawDt = Math.min((now - lastTime) / 1000, 0.1);
   lastTime = now;
+
+  // Integrate against a smoothed frame time, not the raw one. Frame times
+  // are noisy even at a steady average, and feeding that jitter straight
+  // into the motion equations turns it into visible unevenness in the
+  // movement itself. Averaging it out costs a little timing accuracy and
+  // buys a lot of apparent smoothness.
+  dtSmoothed = dtSmoothed > 0 ? dtSmoothed + (rawDt - dtSmoothed) * 0.15 : rawDt;
+  const dt = dtSmoothed;
+
+  // Low-pass the stick so the camera eases into and out of motion instead of
+  // tracking every tremor in the hand. tau is the time constant in seconds;
+  // the exponential form makes the response identical regardless of frame
+  // rate, which a plain per-frame lerp would not be.
+  const tau = settings.inputSmoothing;
+  const k = tau > 0 ? 1 - Math.exp(-rawDt / tau) : 1;
+  smIn.x += (sm.x - smIn.x) * k;
+  smIn.y += (sm.y - smIn.y) * k;
+  smIn.z += (sm.z - smIn.z) * k;
+  smIn.rx += (sm.rx - smIn.rx) * k;
+  smIn.ry += (sm.ry - smIn.ry) * k;
+  smIn.rz += (sm.rz - smIn.rz) * k;
 
   const cam = viewer.camera;
 
@@ -1454,7 +1592,7 @@ function tick() {
   // (90.5°) since roll is genuinely undefined at EXACTLY straight down/up,
   // in any representation -- not a bug, a real singularity everyone works
   // around this way (flight sims included).
-  yaw += sm.rz * settings.rotSpeed * dt;
+  yaw += smIn.rz * settings.rotSpeed * dt;
 
   // Ease into the pitch limit instead of hard-clamping: hitting a hard wall
   // at ±89.5° felt like a sudden jolt (input kept going, motion just
@@ -1463,7 +1601,7 @@ function tick() {
   // at exactly ±90°.
   const PITCH_LIMIT = Cesium.Math.toRadians(89.95); // exactly 90° is the true singularity; this is close enough to feel like straight down
   const PITCH_EASE_MARGIN = Cesium.Math.toRadians(15);
-  let pitchDelta = sm.rx * settings.rotSpeed * dt; // sign flipped: felt reversed to the user
+  let pitchDelta = smIn.rx * settings.rotSpeed * dt; // sign flipped: felt reversed to the user
   if (pitchDelta > 0) {
     const remaining = Cesium.Math.clamp((PITCH_LIMIT - pitch) / PITCH_EASE_MARGIN, 0, 1);
     pitchDelta *= remaining;
@@ -1505,15 +1643,15 @@ function tick() {
   // how high up we are.
   const worldRight = Cesium.Cartesian3.normalize(
     Cesium.Cartesian3.cross(horiz, zenith, new Cesium.Cartesian3()), new Cesium.Cartesian3());
-  if (sm.x || sm.y || sm.z) {
+  if (smIn.x || smIn.y || smIn.z) {
     // heightAboveGround computed once at the top of tick() (not sea-level
     // altitude) -- matters near mountains, e.g. hovering just above Fuji's
     // ~3776m peak should feel like being near the ground and slow down.
     const speed = settings.moveSpeed + heightAboveGround * settings.altFactor;
     const delta = new Cesium.Cartesian3();
-    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(worldRight, sm.x * speed * dt, new Cesium.Cartesian3()), delta);
-    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(zenith, -sm.z * speed * dt, new Cesium.Cartesian3()), delta);
-    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(horiz, -sm.y * speed * dt, new Cesium.Cartesian3()), delta);
+    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(worldRight, smIn.x * speed * dt, new Cesium.Cartesian3()), delta);
+    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(zenith, -smIn.z * speed * dt, new Cesium.Cartesian3()), delta);
+    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(horiz, -smIn.y * speed * dt, new Cesium.Cartesian3()), delta);
     Cesium.Cartesian3.add(cam.position, delta, cam.position);
   }
 
@@ -1523,7 +1661,7 @@ function tick() {
     `${carto.height.toFixed(0)} (地表から ${heightAboveGround.toFixed(0)})`;
   const curSpeed = settings.moveSpeed + heightAboveGround * settings.altFactor;
   document.getElementById('speed').textContent =
-    (Math.hypot(sm.x, sm.y, sm.z) * curSpeed).toFixed(1);
+    (Math.hypot(smIn.x, smIn.y, smIn.z) * curSpeed).toFixed(1);
   document.getElementById('rawvals').textContent =
     `x=${sm.x.toFixed(2)} y=${sm.y.toFixed(2)} z=${sm.z.toFixed(2)} | rx=${sm.rx.toFixed(2)} ry=${sm.ry.toFixed(2)} rz=${sm.rz.toFixed(2)}`;
 
@@ -1541,7 +1679,15 @@ function tick() {
   // Is the camera actually being flown right now? Framerate only matters
   // while something is moving; once the view is parked, a sharp picture is
   // worth far more than headroom nobody is using.
-  const moving = !!(sm.x || sm.y || sm.z || sm.rx || sm.ry || sm.rz);
+  // Judged on the SMOOTHED input, not the raw stick: with inertia the camera
+  // is still coasting for a moment after the hand lets go, and treating that
+  // as "parked" would raise quality mid-glide and then drop it again. The
+  // smoothed value decays asymptotically, so it needs a threshold rather
+  // than a test against exactly zero.
+  const IDLE_EPS = 0.004;
+  const moving = Math.abs(smIn.x) > IDLE_EPS || Math.abs(smIn.y) > IDLE_EPS ||
+                 Math.abs(smIn.z) > IDLE_EPS || Math.abs(smIn.rx) > IDLE_EPS ||
+                 Math.abs(smIn.ry) > IDLE_EPS || Math.abs(smIn.rz) > IDLE_EPS;
   idleMs = moving ? 0 : idleMs + dt * 1000;
   const parked = idleMs > 350;
 
@@ -1623,12 +1769,32 @@ function tick() {
   // Heading (compass direction, 0=North matching our yaw convention) and
   // pitch (look up/down angle), for "which way am I facing" awareness.
   const headingDeg = ((Cesium.Math.toDegrees(yaw) % 360) + 360) % 360;
-  drawCompass(headingDeg);
-  drawAttitude(Cesium.Math.toDegrees(pitch));
 
-  updatePeakLabels();
-  updateSkyCompass(carto);
-  updateMinimap(carto, headingDeg);
+  // All of the overlay work below is a pure function of where the camera is
+  // and where it points, so when neither has changed the answer is the one
+  // already on screen. Recomputing it anyway was the single largest thing
+  // this app did while sitting completely still. The terrain-occlusion pass
+  // can still flip a label's visibility from its own timer, so it asks for a
+  // refresh when it does.
+  const camMoved =
+    Math.abs(cam.position.x - lastOverlayPos.x) > 0.5 ||
+    Math.abs(cam.position.y - lastOverlayPos.y) > 0.5 ||
+    Math.abs(cam.position.z - lastOverlayPos.z) > 0.5 ||
+    Math.abs(yaw - lastOverlayYaw) > 1e-5 ||
+    Math.abs(pitch - lastOverlayPitch) > 1e-5;
+
+  if (camMoved || overlayDirty) {
+    overlayDirty = false;
+    Cesium.Cartesian3.clone(cam.position, lastOverlayPos);
+    lastOverlayYaw = yaw;
+    lastOverlayPitch = pitch;
+
+    drawCompass(headingDeg);
+    drawAttitude(Cesium.Math.toDegrees(pitch));
+    updatePeakLabels();
+    updateSkyCompass(carto);
+    updateMinimap(carto, headingDeg);
+  }
 
   requestAnimationFrame(tick);
 }
