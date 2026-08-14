@@ -1,0 +1,1895 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Peak Cruiser</title>
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Cesium.js"></script>
+<link href="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<style>
+  html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+  /* Readouts and instruments bottom-left, minimap bottom-right: the whole
+     upper view stays clear for the mountains and their labels. */
+  #hud {
+    position: absolute; bottom: 10px; left: 10px; z-index: 10;
+    font-family: sans-serif; color: #fff; background: rgba(0,0,0,0.5);
+    padding: 10px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5;
+  }
+  #hudText { min-width: 232px; }
+  #connectBtn { font-size: 1rem; padding: 0.4rem 1rem; cursor: pointer; margin-bottom: 6px; }
+  .ok { color: #6f6; } .bad { color: #f66; }
+
+  /* PeakFinder-style leader-line labels. The element is a zero-size anchor
+     placed exactly on the summit's screen point; dot, line and text all
+     position themselves off that origin. */
+  .peak-label {
+    position: absolute; width: 0; height: 0; z-index: 5; pointer-events: none;
+    font-family: sans-serif; color: #fff; text-shadow: 0 0 4px #000, 0 0 3px #000;
+  }
+  /* Slanted text, pivoting on the top of the leader line. Rotating the names
+     is what lets them pack tightly: two labels only collide once the
+     perpendicular gap between their parallel baselines closes, so peaks a
+     couple of dozen pixels apart can both stay legible instead of one
+     having to be dropped. */
+  .peak-label .rot {
+    position: absolute; left: 0; display: block; white-space: nowrap;
+    transform-origin: 0 100%; transform: rotate(-45deg);
+  }
+  /* Every label leans the same way. Mirroring the ones near the right edge
+     was tried and dropped: the two directions crossed over each other, and
+     running off the side edge is harmless anyway. */
+  .peak-label .name { font-size: 13px; font-weight: bold; }
+  .peak-label .dist { font-size: 10px; opacity: 0.85; margin-left: 4px; }
+  .peak-label .line {
+    position: absolute; left: 0; bottom: 0; width: 1px;
+    background: rgba(255,255,255,0.8);
+  }
+  .peak-label .dot {
+    position: absolute; left: -4px; bottom: -4px;
+    width: 6px; height: 6px; border-radius: 50%; background: #fff;
+    border: 1px solid rgba(0,0,0,0.75);
+  }
+
+  #settingsBtn {
+    position: absolute; top: 10px; right: 10px; z-index: 10;
+    font-size: 1rem; padding: 0.4rem 0.8rem; cursor: pointer;
+  }
+  #settingsPanel {
+    position: absolute; top: 50px; right: 10px; z-index: 10;
+    font-family: sans-serif; color: #fff; background: rgba(0,0,0,0.75);
+    padding: 14px 16px; border-radius: 6px; font-size: 13px; width: 260px;
+    display: none;
+  }
+  #settingsPanel.open { display: block; }
+  #settingsPanel .row { margin-bottom: 12px; }
+  #settingsPanel label { display: flex; justify-content: space-between; margin-bottom: 3px; }
+  #settingsPanel input[type=range] { width: 100%; }
+  #settingsPanel button.reset {
+    width: 100%; padding: 5px; cursor: pointer; margin-top: 4px;
+  }
+
+  /* Compass bearings drawn on the horizon, PeakFinder-style. Amber rather
+     than white so they read as a separate layer from the peak names. */
+  /* Anchored by its BOTTOM edge, so the marker stacks upward from the
+     horizon point: the lower tick just touches the skyline and the text sits
+     clear of the terrain, against the sky where it stays readable. */
+  .sky-dir {
+    position: absolute; transform: translate(-50%, -100%);
+    display: flex; flex-direction: column; align-items: center;
+    font-family: sans-serif; color: #ffd54f; text-align: center;
+    text-shadow: 0 0 4px #000, 0 0 3px #000; white-space: nowrap;
+  }
+  /* Three weights so the eye can find N/E/S/W instantly and read the rest
+     as subdivisions between them. */
+  .sky-dir .lbl { letter-spacing: 1px; line-height: 1.1; }
+  .sky-dir.cardinal .lbl { font-size: 17px; font-weight: bold; }
+  .sky-dir.inter .lbl { font-size: 13px; font-weight: bold; opacity: 0.92; }
+  .sky-dir.minor .lbl { font-size: 10px; opacity: 0.7; }
+  /* Short tick above the label, then a long stem running all the way down
+     from the sky to the point on the horizon it marks. Fading the stem out
+     toward the bottom keeps it from competing with the terrain silhouette
+     and the peak leader lines it crosses. */
+  .sky-dir .tick { width: 1px; background: rgba(255,213,79,0.85); }
+  .sky-dir.cardinal .tick { height: 14px; }
+  .sky-dir.inter .tick { height: 10px; }
+  .sky-dir.minor .tick { height: 6px; opacity: 0.6; }
+  .sky-dir .tick.top { margin-bottom: 3px; }
+  .sky-dir .stem {
+    width: 1px; flex: 1; margin-top: 3px; min-height: 0;
+    background: linear-gradient(to bottom,
+      rgba(255,213,79,0.8) 0%, rgba(255,213,79,0.45) 55%, rgba(255,213,79,0.12) 100%);
+  }
+  .sky-dir.minor .stem { opacity: 0.55; }
+
+  #nearbyBtn {
+    position: absolute; top: 10px; right: 96px; z-index: 10;
+    font-size: 1rem; padding: 0.4rem 0.8rem; cursor: pointer;
+  }
+  #nearbyPanel {
+    position: absolute; top: 50px; right: 10px; z-index: 10; display: none;
+    font-family: sans-serif; color: #fff; background: rgba(0,0,0,0.75);
+    padding: 10px 12px; border-radius: 6px; font-size: 12px; width: 290px;
+    max-height: 70vh; overflow-y: auto;
+  }
+  #nearbyPanel.open { display: block; }
+  #nearbyPanel table { border-collapse: collapse; width: 100%; }
+  #nearbyPanel td { padding: 2px 4px; white-space: nowrap; }
+  #nearbyPanel td.dir { color: #9ecbff; width: 2.6em; }
+  #nearbyPanel td.km { text-align: right; color: #ddd; }
+  #nearbyPanel td.el { text-align: right; color: #aaa; }
+  #nearbyPanel tr.r100 td.nm { color: #ffd54f; }
+  #nearbyPanel .vis { color: #8f8; }
+
+  #minimap {
+    position: absolute; bottom: 10px; right: 10px; z-index: 10; display: block;
+    background: rgba(0,0,0,0.6);
+    border-radius: 6px; border: 1px solid rgba(255,255,255,0.3);
+  }
+</style>
+</head>
+<body>
+<div id="cesiumContainer"></div>
+<div id="peakLabels" style="position:absolute; inset:0; z-index:5; pointer-events:none; overflow:hidden;"></div>
+<div id="skyCompass" style="position:absolute; inset:0; z-index:4; pointer-events:none; overflow:hidden;"></div>
+<button id="nearbyBtn">📋 近くの山</button>
+<div id="nearbyPanel"><div id="nearbyList"></div></div>
+<canvas id="minimap" width="240" height="240"></canvas>
+<div id="hud">
+  <div id="hudText">
+    <div style="font-weight:bold; font-size:15px; margin-bottom:5px;">🏔 Peak Cruiser</div>
+    <button id="connectBtn">SpaceMouseに接続</button><br>
+    <span id="status">未接続</span><br>
+    速度: <span id="speed">0.0</span> m/s<br>
+    高度: <span id="alt">-</span> m<br>
+    <span style="color:#ffd54f">FPS: <span id="fps">-</span> &nbsp; 画質: <span id="resScale">-</span></span><br>
+    <span style="color:#ffd54f">地形: <span id="terrainSSE">-</span> &nbsp; 通信中: <span id="pendingTiles">-</span></span><br>
+    <span style="font-size:11px">キャッシュ: <span id="cacheStatus">-</span></span><br>
+    <span id="rawvals" style="font-size:11px;opacity:0.9">x=0 y=0 z=0 | rx=0 ry=0 rz=0</span>
+    <div style="display:flex; gap:8px; margin-top:6px;">
+      <canvas id="compass" width="80" height="80"></canvas>
+      <canvas id="attitude" width="80" height="80"></canvas>
+    </div>
+  </div>
+</div>
+
+<button id="settingsBtn">⚙ 設定</button>
+<div id="settingsPanel">
+  <div class="row">
+    <label><span>基本速度 (最低速度)</span><span id="v_moveSpeed"></span></label>
+    <input type="range" id="s_moveSpeed" min="10" max="50000" step="10">
+  </div>
+  <div class="row">
+    <label><span>高度による加速</span><span id="v_altFactor"></span></label>
+    <input type="range" id="s_altFactor" min="0" max="10" step="0.05">
+  </div>
+  <div class="row">
+    <label><span>回転速度</span><span id="v_rotSpeed"></span></label>
+    <input type="range" id="s_rotSpeed" min="0.1" max="8" step="0.05">
+  </div>
+  <div class="row">
+    <label><span>不感帯(デッドゾーン)</span><span id="v_deadzone"></span></label>
+    <input type="range" id="s_deadzone" min="0" max="0.5" step="0.01">
+  </div>
+  <div class="row">
+    <label><span>画質上限(解像度)</span><span id="v_maxResolutionScale"></span></label>
+    <input type="range" id="s_maxResolutionScale" min="0.15" max="1.0" step="0.05">
+  </div>
+  <div class="row">
+    <label><span>画質下限(解像度)</span><span id="v_minResolutionScale"></span></label>
+    <input type="range" id="s_minResolutionScale" min="0.1" max="1.0" step="0.02">
+  </div>
+  <div class="row">
+    <label><span>ミニマップ拡大率</span><span id="v_minimapZoom"></span></label>
+    <input type="range" id="s_minimapZoom" min="5" max="12" step="1">
+  </div>
+  <div class="row">
+    <label><span>地形の細かさ(小さいほど高精細)</span><span id="v_terrainDetail"></span></label>
+    <input type="range" id="s_terrainDetail" min="0.5" max="8" step="0.5">
+  </div>
+  <div class="row">
+    <label><span>遠いラベルの濃さ</span><span id="v_labelFarOpacity"></span></label>
+    <input type="range" id="s_labelFarOpacity" min="0" max="1" step="0.05">
+  </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_japanOnly" style="width:auto;">
+      <span>日本の範囲だけ描画</span>
+    </label>
+  </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_sunLighting" style="width:auto;">
+      <span>太陽で陰影をつける(昼夜)</span>
+    </label>
+  </div>
+  <div class="row">
+    <label><span>地表テクスチャ</span></label>
+    <select id="s_imagery" style="width:100%; padding:4px;"></select>
+  </div>
+  <div class="row">
+    <label><span>遠景のかすみ</span><span id="v_fogDensity"></span></label>
+    <input type="range" id="s_fogDensity" min="0" max="2" step="0.05">
+  </div>
+  <div class="row">
+    <label><span>時刻 (JST)</span><span id="v_timeOfDay"></span></label>
+    <input type="range" id="s_timeOfDay" min="0" max="24" step="0.25">
+  </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_occlusion" style="width:auto;">
+      <span>地形に隠れた山を消す(重い)</span>
+    </label>
+  </div>
+  <button class="reset" id="resetBtn">初期値に戻す</button>
+</div>
+
+<script>
+// No Cesium ion account needed: OpenStreetMap imagery. Real elevation comes
+// from Esri's public ArcGIS World Elevation service (no token required,
+// widely used in the Cesium community for exactly this).
+Cesium.Ion.defaultAccessToken = undefined;
+
+const viewer = new Cesium.Viewer('cesiumContainer', {
+  baseLayer: new Cesium.ImageryLayer(
+    new Cesium.OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
+  ),
+  baseLayerPicker: false,
+  geocoder: false,
+  homeButton: false,
+  sceneModePicker: false,
+  navigationHelpButton: false,
+  animation: false,
+  timeline: false,
+  fullscreenButton: false,
+  infoBox: false,
+  selectionIndicator: false,
+});
+viewer.scene.globe.depthTestAgainstTerrain = true;
+// Real (1:1) elevation reads as nearly flat from typical viewing distances
+// -- even Fuji's ~3776m is subtle across tens of km of horizontal view.
+// Exaggerating vertically makes the relief actually readable, matching the
+// "shape-first, dramatic" look from the earlier Blender attempt.
+viewer.scene.verticalExaggeration = 1.0; // real scale preferred over the dramatic look
+
+// ---- Selectable surface textures.
+// Every option here is a plain raster tile layer whose shading is baked in
+// server-side. That's deliberate: Cesium's real-time globe materials (the
+// ElevationRamp/SlopeRamp family) blow past this GPU's 16 fragment texture
+// units the moment they're combined with imagery, and SlopeRamp additionally
+// needs vertex normals the ArcGIS terrain source doesn't provide. Fetching
+// pre-shaded tiles sidesteps both problems entirely and costs one texture
+// unit, same as any other imagery.
+//
+// The GSI (国土地理院) layers only cover Japan, which is fine -- the globe is
+// clipped to Japan anyway.
+const GSI = 'https://cyberjapandata.gsi.go.jp/xyz';
+const GSI_CREDIT = '国土地理院';
+const IMAGERY_OPTIONS = [
+  { id: 'opentopo', label: '地形図 (OpenTopoMap)', layers: [
+    { url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+      subdomains: ['a','b','c'], credit: '© OpenTopoMap (CC-BY-SA)', maximumLevel: 16 } ] },
+  // minimumLevel matters as much as maximumLevel here: each GSI layer only
+  // exists over a specific zoom range, and without a floor Cesium happily
+  // asks for z0-4 and collects a pile of 404s on every load.
+  { id: 'relief', label: '色別標高図 (グラデーション)', layers: [
+    { url: `${GSI}/relief/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 5, maximumLevel: 15 } ] },
+  // Elevation colour carries the "how high is it", the hillshade on top
+  // carries the "what shape is it". Two cheap raster layers give the look
+  // the GPU-side material was reaching for, without the material.
+  { id: 'relief_shade', label: '色別標高図＋陰影 (おすすめ)', layers: [
+    { url: `${GSI}/relief/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 5, maximumLevel: 15 },
+    { url: `${GSI}/hillshademap/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 16, alpha: 0.55 } ] },
+  { id: 'photo', label: '航空写真', layers: [
+    { url: `${GSI}/seamlessphoto/{z}/{x}/{y}.jpg`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
+  { id: 'pale', label: '淡色地図', layers: [
+    { url: `${GSI}/pale/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
+  { id: 'shade', label: '陰影起伏図のみ (白黒)', layers: [
+    { url: `${GSI}/hillshademap/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 16 } ] },
+  { id: 'std', label: '標準地図', layers: [
+    { url: `${GSI}/std/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
+];
+
+function applyImagery() {
+  const opt = IMAGERY_OPTIONS.find(o => o.id === settings.imagery) || IMAGERY_OPTIONS[0];
+  viewer.imageryLayers.removeAll();
+  for (const spec of opt.layers) {
+    const layer = viewer.imageryLayers.addImageryProvider(
+      new Cesium.UrlTemplateImageryProvider(spec));
+    if (spec.alpha !== undefined) layer.alpha = spec.alpha;
+  }
+  viewer.scene.requestRender();
+}
+
+viewer.scene.globe.material = undefined;
+viewer.scene.globe.showWaterEffect = true;
+
+// ---- Performance: this is a 2018 integrated GPU (Iris Plus 655), not a
+// gaming card. Priority: keep VISIBLE terrain's detail/3D feel, cut
+// everything else that doesn't directly serve that.
+// Both of these are placeholders: the adaptive quality controller below
+// takes over once settings load, and drives them from measured FPS.
+viewer.scene.globe.maximumScreenSpaceError = 2;
+viewer.resolutionScale = 0.65;
+viewer.scene.postProcessStages.fxaa.enabled = false; // anti-aliasing pass is real GPU cost for a subtle effect
+
+viewer.scene.fog.enabled = true;                // wanted back for aerial-perspective depth cueing
+viewer.scene.skyAtmosphere.show = false;        // sky glow/limb ring -- not a terrain depth cue, cut it
+// Ground atmosphere back ON, despite costing a little. It is what supplies
+// the fog's COLOUR: with it off, Cesium blends distant terrain toward a dark
+// unlit tone, which is why far ranges turned into a black band instead of
+// receding into haze. Fog without atmosphere doesn't mean "no haze", it
+// means "haze that is the wrong colour".
+viewer.scene.globe.showGroundAtmosphere = true;
+viewer.scene.skyBox.show = false;               // stars -- purely decorative, cut it
+// Flat sky-blue instead of pure black now that the atmosphere/stars are off.
+viewer.scene.backgroundColor = Cesium.Color.fromCssColorString('#8fc6ea');
+
+// ---- Making distant ranges actually readable.
+// Three separate things were conspiring to turn far-off mountains into one
+// flat dark slab on the horizon:
+//
+// 1. fog.minimumBrightness (default 0.1) multiplies distant terrain down to
+//    near-black. That's the dark band -- it isn't shadow or missing imagery,
+//    it's the fog deliberately crushing the brightness.
+viewer.scene.fog.minimumBrightness = 0.75;
+// 2. fog.screenSpaceErrorFactor inflates the allowed terrain error with
+//    distance, so far ridges collapse into a smooth silhouette with no
+//    relief. Lower factor = distant terrain keeps its shape.
+viewer.scene.fog.screenSpaceErrorFactor = 1.0;
+// Haze strength, live-tunable. Cesium's default density (2.0e-4) is tuned
+// for a whole-globe view and is far too thick for looking across a hundred
+// km of mountains -- it buries exactly the distant ridges this app exists to
+// show. Dropping it to 0 turns haze off entirely, which is also the quickest
+// way to confirm whether fog is what's hiding a far peak.
+const FOG_DENSITY_BASE = 2.0e-4;
+function applyFog() {
+  viewer.scene.fog.enabled = settings.fogDensity > 0;
+  viewer.scene.fog.density = FOG_DENSITY_BASE * settings.fogDensity;
+  viewer.scene.requestRender();
+}
+
+// 3. With no imagery loaded that far out, whatever shows through is
+//    globe.baseColor -- dark by default. A pale haze tone means the worst
+//    case is "washed out and far away" rather than "black wall".
+viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#b8d4e6');
+
+// Skip sibling tiles (pure waste for a forward-facing camera), but DO keep
+// ancestors: they're few, cheap and low-res, and they're the fallback that
+// gets drawn while a distant tile is still loading. Without them the far
+// horizon falls back to baseColor and flickers as tiles arrive.
+viewer.scene.globe.preloadSiblings = false;
+viewer.scene.globe.preloadAncestors = true;
+
+Cesium.ArcGISTiledElevationTerrainProvider.fromUrl(
+  'https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer',
+  { requestVertexNormals: true } // needed for slope/aspect-based materials (SlopeRamp etc.) to work at all
+).then(terrainProvider => {
+  viewer.terrainProvider = terrainProvider;
+}).catch(err => {
+  console.error('terrain load failed, staying flat:', err);
+});
+
+// NOTE: we do NOT disable Cesium's screenSpaceCameraController here.
+// Setting enableRotate/enableZoom/etc. to false turned out to break Cesium's
+// internal tile-loading/LOD logic entirely (confirmed by testing: with the
+// controller disabled, imagery never rendered -- a solid black/navy screen
+// at any close-up altitude, even though tiles fetch fine and the globe
+// itself was present). Leaving the controller enabled but simply never
+// generating mouse/touch events (all navigation drives from the SpaceMouse,
+// which updates the camera directly every frame in tick() below) achieves
+// the same unconstrained free-flight feel without breaking rendering.
+
+// Start above Mt. Fuji.
+viewer.camera.setView({
+  destination: Cesium.Cartesian3.fromDegrees(138.7274, 35.3606, 8000),
+  orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 }
+});
+// Cesium quirk (confirmed by extensive testing): a fresh Viewer whose very
+// first view is already a close-up zoom gets its imagery tile pipeline
+// permanently stuck -- solid black/navy, zero tile requests ever made for
+// that view, as if it needs to build its tile quadtree starting from a
+// coarser zoom. flyHome()/flyTo() sometimes avoided it, setView() alone
+// never did, and neither was reliable enough to depend on. Toggling
+// globe.show off and back on forces Cesium to rebuild the quadtree from
+// scratch at the CURRENT camera position and reliably un-sticks it.
+viewer.scene.globe.show = false;
+viewer.scene.requestRender();
+setTimeout(() => {
+  viewer.scene.globe.show = true;
+  viewer.scene.requestRender();
+}, 100);
+
+// ---- PeakFinder-style peak labels ----
+// Registered mountains (from Obsidian vault's 山.base). Coordinates for
+// 御在所岳/藤原岳 are approximate (Suzuka mountains, precise summit coords
+// weren't findable) -- fine for "which direction is this peak roughly in",
+// refine later if needed.
+const PEAKS = [
+  { name: '富士山',   lon: 138.7274, lat: 35.3606, elev: 3776 },
+  { name: '北岳',     lon: 138.2389, lat: 35.6746, elev: 3193 },
+  { name: '天城山',   lon: 139.0019, lat: 34.8628, elev: 1405 },
+  { name: '筑波山',   lon: 140.1067, lat: 36.2254, elev: 877 },
+  { name: '御在所岳', lon: 136.4133, lat: 35.0043, elev: 1212 },
+  { name: '藤原岳',   lon: 136.4283, lat: 35.1919, elev: 1144 },
+];
+// The 300 Famous Japanese Mountains -- the 百名山 (Fukada), the 二百名山
+// (Fukada Club) and the 三百名山 (Japanese Alpine Club) merged into one list
+// of 301 summits. `rank` records which list a peak came from (100/200/300).
+// Deduplicated by rounded coordinate, so a peak appearing on more than one
+// list is kept once, at its best rank.
+// Source: 100sen.cyber-ninja.jp/csv/{100,200,300}meizan02.csv
+const MEIZAN = [
+  { name: '利尻山（利尻富士）', lon: 141.2419444, lat: 45.1786111, elev: 1721, rank: 100 },
+  { name: '羅臼岳', lon: 145.1222222, lat: 44.0758333, elev: 1661, rank: 100 },
+  { name: '斜里岳', lon: 144.7177777, lat: 43.7655555, elev: 1547, rank: 100 },
+  { name: '阿寒岳（雌阿寒岳）', lon: 144.0088888, lat: 43.3866666, elev: 1499, rank: 100 },
+  { name: '大雪山（旭岳）', lon: 142.8541666, lat: 43.6636111, elev: 2291, rank: 100 },
+  { name: 'トムラウシ山', lon: 142.8488888, lat: 43.5272222, elev: 2141, rank: 100 },
+  { name: '十勝岳', lon: 142.6863888, lat: 43.4180555, elev: 2077, rank: 100 },
+  { name: '幌尻岳', lon: 142.6827777, lat: 42.7194444, elev: 2052, rank: 100 },
+  { name: '後方羊蹄山（羊蹄山）', lon: 140.8113888, lat: 42.8266666, elev: 1898, rank: 100 },
+  { name: '岩木山', lon: 140.3030555, lat: 40.6558333, elev: 1625, rank: 100 },
+  { name: '八甲田山（大岳）', lon: 140.8772222, lat: 40.6588888, elev: 1585, rank: 100 },
+  { name: '八幡平', lon: 140.8541666, lat: 39.9577777, elev: 1613, rank: 100 },
+  { name: '岩手山', lon: 141.0011111, lat: 39.8525, elev: 2038, rank: 100 },
+  { name: '早池峰山', lon: 141.4886111, lat: 39.5586111, elev: 1917, rank: 100 },
+  { name: '鳥海山（新山）', lon: 140.0488888, lat: 39.0991666, elev: 2236, rank: 100 },
+  { name: '月山', lon: 140.0269444, lat: 38.5488888, elev: 1984, rank: 100 },
+  { name: '朝日岳（大朝日岳）', lon: 139.9222222, lat: 38.2605555, elev: 1871, rank: 100 },
+  { name: '蔵王山（熊野岳）', lon: 140.44, lat: 38.1436111, elev: 1841, rank: 100 },
+  { name: '飯豊山', lon: 139.7072222, lat: 37.8547222, elev: 2105, rank: 100 },
+  { name: '吾妻山（西吾妻山）', lon: 140.1408333, lat: 37.7383333, elev: 2035, rank: 100 },
+  { name: '安達太良山', lon: 140.2877777, lat: 37.6211111, elev: 1700, rank: 100 },
+  { name: '磐梯山', lon: 140.0722222, lat: 37.6008333, elev: 1816, rank: 100 },
+  { name: '駒ヶ岳（会津駒ヶ岳）', lon: 139.3536111, lat: 37.0475, elev: 2133, rank: 100 },
+  { name: '那須岳（茶臼岳）', lon: 139.9627777, lat: 37.1247222, elev: 1915, rank: 100 },
+  { name: '駒ヶ岳（越後駒ヶ岳）', lon: 139.0752777, lat: 37.1236111, elev: 2003, rank: 100 },
+  { name: '平ヶ岳', lon: 139.1708333, lat: 37.0019444, elev: 2141, rank: 100 },
+  { name: '巻機山', lon: 138.9641666, lat: 36.9786111, elev: 1967, rank: 100 },
+  { name: '燧ヶ岳（柴安嵓）', lon: 139.2852777, lat: 36.955, elev: 2356, rank: 100 },
+  { name: '至仏山', lon: 139.1733333, lat: 36.9036111, elev: 2228, rank: 100 },
+  { name: '谷川岳（オキノ耳）', lon: 138.93, lat: 36.8372222, elev: 1977, rank: 100 },
+  { name: '雨飾山', lon: 137.9625, lat: 36.9019444, elev: 1963, rank: 100 },
+  { name: '苗場山', lon: 138.6902777, lat: 36.8458333, elev: 2145, rank: 100 },
+  { name: '妙高山', lon: 138.1136111, lat: 36.8913888, elev: 2454, rank: 100 },
+  { name: '火打山', lon: 138.0680555, lat: 36.9227777, elev: 2462, rank: 100 },
+  { name: '高妻山', lon: 138.0519444, lat: 36.8, elev: 2353, rank: 100 },
+  { name: '男体山', lon: 139.4908333, lat: 36.765, elev: 2486, rank: 100 },
+  { name: '白根山（日光白根山）', lon: 139.3758333, lat: 36.7986111, elev: 2578, rank: 100 },
+  { name: '皇海山', lon: 139.3369444, lat: 36.69, elev: 2144, rank: 100 },
+  { name: '武尊山', lon: 139.1325, lat: 36.8052777, elev: 2158, rank: 100 },
+  { name: '赤城山（黒檜山）', lon: 139.1933333, lat: 36.5602777, elev: 1828, rank: 100 },
+  { name: '本白根山（草津白根山）', lon: 138.5319444, lat: 36.6227777, elev: 2171, rank: 100 },
+  { name: '四阿山', lon: 138.4130555, lat: 36.5416666, elev: 2354, rank: 100 },
+  { name: '浅間山', lon: 138.5230555, lat: 36.4063888, elev: 2568, rank: 100 },
+  { name: '筑波山', lon: 140.1066666, lat: 36.2252777, elev: 877, rank: 100 },
+  { name: '白馬岳', lon: 137.7586111, lat: 36.7586111, elev: 2932, rank: 100 },
+  { name: '五龍岳', lon: 137.7527777, lat: 36.6583333, elev: 2814, rank: 100 },
+  { name: '鹿島槍ヶ岳', lon: 137.7469444, lat: 36.6244444, elev: 2889, rank: 100 },
+  { name: '剱岳', lon: 137.6169444, lat: 36.6233333, elev: 2999, rank: 100 },
+  { name: '立山（大汝山）', lon: 137.6197222, lat: 36.5758333, elev: 3015, rank: 100 },
+  { name: '薬師岳', lon: 137.5447222, lat: 36.4688888, elev: 2926, rank: 100 },
+  { name: '黒部五郎岳（中ノ俣岳）', lon: 137.54, lat: 36.3925, elev: 2840, rank: 100 },
+  { name: '水晶岳（黒岳）', lon: 137.6027777, lat: 36.4263888, elev: 2986, rank: 100 },
+  { name: '鷲羽岳', lon: 137.6052777, lat: 36.4030555, elev: 2924, rank: 100 },
+  { name: '槍ヶ岳', lon: 137.6475, lat: 36.3419444, elev: 3180, rank: 100 },
+  { name: '穂高岳（奥穂高岳）', lon: 137.6480555, lat: 36.2891666, elev: 3190, rank: 100 },
+  { name: '常念岳', lon: 137.7275, lat: 36.3255555, elev: 2857, rank: 100 },
+  { name: '笠ヶ岳', lon: 137.5502777, lat: 36.3155555, elev: 2898, rank: 100 },
+  { name: '焼岳', lon: 137.5869444, lat: 36.2269444, elev: 2455, rank: 100 },
+  { name: '乗鞍岳（剣ヶ峰）', lon: 137.5536111, lat: 36.1063888, elev: 3026, rank: 100 },
+  { name: '御嶽山（剣ヶ峰）', lon: 137.4802777, lat: 35.8927777, elev: 3067, rank: 100 },
+  { name: '美ヶ原（王ヶ頭）', lon: 138.1075, lat: 36.2258333, elev: 2034, rank: 100 },
+  { name: '霧ヶ峰（車山）', lon: 138.1966666, lat: 36.1030555, elev: 1925, rank: 100 },
+  { name: '蓼科山', lon: 138.295, lat: 36.1036111, elev: 2531, rank: 100 },
+  { name: '八ヶ岳（赤岳）', lon: 138.37, lat: 35.9708333, elev: 2899, rank: 100 },
+  { name: '両神山', lon: 138.8413888, lat: 36.0233333, elev: 1723, rank: 100 },
+  { name: '雲取山', lon: 138.9438888, lat: 35.8555555, elev: 2017, rank: 100 },
+  { name: '甲武信ヶ岳', lon: 138.7288888, lat: 35.9088888, elev: 2475, rank: 100 },
+  { name: '金峰山', lon: 138.6252777, lat: 35.8713888, elev: 2599, rank: 100 },
+  { name: '瑞牆山', lon: 138.5919444, lat: 35.8933333, elev: 2230, rank: 100 },
+  { name: '大菩薩嶺', lon: 138.8455555, lat: 35.7488888, elev: 2057, rank: 100 },
+  { name: '丹沢山（蛭ヶ岳）', lon: 139.1388888, lat: 35.4863888, elev: 1673, rank: 100 },
+  { name: '富士山（剣ヶ峰）', lon: 138.7275, lat: 35.3608333, elev: 3776, rank: 100 },
+  { name: '天城山（万三郎岳）', lon: 139.0016666, lat: 34.8627777, elev: 1406, rank: 100 },
+  { name: '駒ヶ岳（木曽駒ヶ岳）', lon: 137.8044444, lat: 35.7894444, elev: 2956, rank: 100 },
+  { name: '空木岳', lon: 137.8172222, lat: 35.7188888, elev: 2864, rank: 100 },
+  { name: '恵那山', lon: 137.5972222, lat: 35.4436111, elev: 2191, rank: 100 },
+  { name: '駒ヶ岳（甲斐駒ヶ岳）', lon: 138.2366666, lat: 35.7580555, elev: 2967, rank: 100 },
+  { name: '仙丈ヶ岳', lon: 138.1836111, lat: 35.72, elev: 3033, rank: 100 },
+  { name: '鳳凰山（観音ヶ岳）', lon: 138.3047222, lat: 35.7016666, elev: 2841, rank: 100 },
+  { name: '北岳', lon: 138.2388888, lat: 35.6744444, elev: 3193, rank: 100 },
+  { name: '間ノ岳', lon: 138.2283333, lat: 35.6461111, elev: 3190, rank: 100 },
+  { name: '塩見岳', lon: 138.1830555, lat: 35.5738888, elev: 3047, rank: 100 },
+  { name: '悪沢岳（東岳）', lon: 138.1825, lat: 35.5008333, elev: 3141, rank: 100 },
+  { name: '赤石岳', lon: 138.1572222, lat: 35.4611111, elev: 3121, rank: 100 },
+  { name: '聖岳（前聖岳）', lon: 138.1397222, lat: 35.4227777, elev: 3013, rank: 100 },
+  { name: '光岳', lon: 138.0838888, lat: 35.3380555, elev: 2592, rank: 100 },
+  { name: '白山（御前峰）', lon: 136.7713888, lat: 36.155, elev: 2702, rank: 100 },
+  { name: '荒島岳', lon: 136.6013888, lat: 35.9341666, elev: 1523, rank: 100 },
+  { name: '伊吹山', lon: 136.4063888, lat: 35.4177777, elev: 1377, rank: 100 },
+  { name: '大台ヶ原山（日出ヶ岳）', lon: 136.1091666, lat: 34.1852777, elev: 1695, rank: 100 },
+  { name: '大峰山（八経ヶ岳）', lon: 135.9075, lat: 34.1736111, elev: 1915, rank: 100 },
+  { name: '大山（剣ヶ峰）', lon: 133.5461111, lat: 35.3711111, elev: 1729, rank: 100 },
+  { name: '剣山', lon: 134.0941666, lat: 33.8536111, elev: 1955, rank: 100 },
+  { name: '石鎚山（天狗岳）', lon: 133.115, lat: 33.7677777, elev: 1982, rank: 100 },
+  { name: 'くじゅう連山（久住山）', lon: 131.2408333, lat: 33.0822222, elev: 1787, rank: 100 },
+  { name: '祖母山', lon: 131.3469444, lat: 32.8280555, elev: 1756, rank: 100 },
+  { name: '阿蘇山（高岳）', lon: 131.1038888, lat: 32.8844444, elev: 1592, rank: 100 },
+  { name: '霧島山（韓国岳）', lon: 130.8616666, lat: 31.9341666, elev: 1700, rank: 100 },
+  { name: '開聞岳', lon: 130.5283333, lat: 31.18, elev: 924, rank: 100 },
+  { name: '宮之浦岳', lon: 130.5041666, lat: 30.3361111, elev: 1936, rank: 100 },
+  { name: '天塩岳', lon: 142.8880555, lat: 43.9644444, elev: 1558, rank: 200 },
+  { name: '石狩岳', lon: 143.0222222, lat: 43.5466666, elev: 1967, rank: 200 },
+  { name: 'ニペソツ山', lon: 143.0322222, lat: 43.4558333, elev: 2013, rank: 200 },
+  { name: 'カムイエクウチカウシ山', lon: 142.7663888, lat: 42.625, elev: 1979, rank: 200 },
+  { name: 'ペテガリ岳', lon: 142.8711111, lat: 42.4994444, elev: 1736, rank: 200 },
+  { name: '芦別岳', lon: 142.2836111, lat: 43.2358333, elev: 1726, rank: 200 },
+  { name: '夕張岳', lon: 142.2511111, lat: 43.0997222, elev: 1668, rank: 200 },
+  { name: '署寒別岳', lon: 141.5230555, lat: 43.7158333, elev: 1492, rank: 200 },
+  { name: '樽前山', lon: 141.3766666, lat: 42.6905555, elev: 1041, rank: 200 },
+  { name: '駒ヶ岳（剣ヶ峰）', lon: 140.6772222, lat: 42.0633333, elev: 1131, rank: 200 },
+  { name: '白神岳', lon: 140.0183333, lat: 40.5075, elev: 1235, rank: 200 },
+  { name: '姫神山', lon: 141.2469444, lat: 39.8441666, elev: 1124, rank: 200 },
+  { name: '秋田駒ヶ岳（男女岳）', lon: 140.7994444, lat: 39.7611111, elev: 1637, rank: 200 },
+  { name: '森吉山', lon: 140.5441666, lat: 39.9766666, elev: 1454, rank: 200 },
+  { name: '和賀岳', lon: 140.7541666, lat: 39.5702777, elev: 1439, rank: 200 },
+  { name: '焼石岳', lon: 140.8288888, lat: 39.1636111, elev: 1547, rank: 200 },
+  { name: '栗駒山', lon: 140.7883333, lat: 38.9608333, elev: 1626, rank: 200 },
+  { name: '神室山', lon: 140.4922222, lat: 38.9022222, elev: 1365, rank: 200 },
+  { name: '以東岳', lon: 139.8491666, lat: 38.3430555, elev: 1772, rank: 200 },
+  { name: '船形山（御所山）', lon: 140.6197222, lat: 38.4555555, elev: 1500, rank: 200 },
+  { name: '杁差岳', lon: 139.6088888, lat: 37.9425, elev: 1636, rank: 200 },
+  { name: '二王子岳', lon: 139.4991666, lat: 37.8997222, elev: 1420, rank: 200 },
+  { name: '御神楽岳', lon: 139.4258333, lat: 37.5219444, elev: 1386, rank: 200 },
+  { name: '守門岳', lon: 139.1366666, lat: 37.3977777, elev: 1537, rank: 200 },
+  { name: '会津朝日岳', lon: 139.3397222, lat: 37.2211111, elev: 1624, rank: 200 },
+  { name: '八海山（入道岳）', lon: 139.0247222, lat: 37.1038888, elev: 1778, rank: 200 },
+  { name: '中ノ岳', lon: 139.0775, lat: 37.0852777, elev: 2085, rank: 200 },
+  { name: '荒沢岳', lon: 139.1480555, lat: 37.1005555, elev: 1969, rank: 200 },
+  { name: '鳥甲山', lon: 138.5838888, lat: 36.8391666, elev: 2038, rank: 200 },
+  { name: '佐武流山', lon: 138.6705555, lat: 36.7722222, elev: 2192, rank: 200 },
+  { name: '白砂山', lon: 138.6933333, lat: 36.7380555, elev: 2140, rank: 200 },
+  { name: '岩菅山', lon: 138.5594444, lat: 36.7419444, elev: 2295, rank: 200 },
+  { name: '仙ノ倉山', lon: 138.8394444, lat: 36.8175, elev: 2026, rank: 200 },
+  { name: '帝釈山', lon: 139.46, lat: 36.9697222, elev: 2060, rank: 200 },
+  { name: '女峰山', lon: 139.5363888, lat: 36.8113888, elev: 2483, rank: 200 },
+  { name: '浅間隠山', lon: 138.6525, lat: 36.4536111, elev: 1757, rank: 200 },
+  { name: '榛名山（相馬山）', lon: 138.9005555, lat: 36.4744444, elev: 1411, rank: 200 },
+  { name: '妙義山（相馬岳）', lon: 138.7488888, lat: 36.2986111, elev: 1104, rank: 200 },
+  { name: '荒船山', lon: 138.6372222, lat: 36.2038888, elev: 1423, rank: 200 },
+  { name: '御座山', lon: 138.6066666, lat: 36.0338888, elev: 2112, rank: 200 },
+  { name: '武甲山', lon: 139.0977777, lat: 35.9516666, elev: 1304, rank: 200 },
+  { name: '白石山（和名倉山）', lon: 138.8780555, lat: 35.8994444, elev: 2036, rank: 200 },
+  { name: '茅ヶ岳', lon: 138.5138888, lat: 35.795, elev: 1704, rank: 200 },
+  { name: '乾徳山', lon: 138.715, lat: 35.8230555, elev: 2031, rank: 200 },
+  { name: '大岳山', lon: 139.1302777, lat: 35.7652777, elev: 1266, rank: 200 },
+  { name: '三ツ峠山', lon: 138.8091666, lat: 35.5491666, elev: 1785, rank: 200 },
+  { name: '御正体山', lon: 138.9316666, lat: 35.4869444, elev: 1681, rank: 200 },
+  { name: '毛無山', lon: 138.5438888, lat: 35.4158333, elev: 1964, rank: 200 },
+  { name: '愛鷹山（越前岳）', lon: 138.7938888, lat: 35.2380555, elev: 1504, rank: 200 },
+  { name: '天狗岳', lon: 138.3555555, lat: 36.0191666, elev: 2646, rank: 200 },
+  { name: '雪倉岳', lon: 137.7541666, lat: 36.7947222, elev: 2611, rank: 200 },
+  { name: '針ノ木岳', lon: 137.6844444, lat: 36.5380555, elev: 2821, rank: 200 },
+  { name: '烏帽子岳', lon: 137.6508333, lat: 36.4794444, elev: 2628, rank: 200 },
+  { name: '赤牛岳', lon: 137.6033333, lat: 36.4616666, elev: 2864, rank: 200 },
+  { name: '毛勝山', lon: 137.5908333, lat: 36.7011111, elev: 2415, rank: 200 },
+  { name: '奥大日岳', lon: 137.5808333, lat: 36.5983333, elev: 2611, rank: 200 },
+  { name: '有明山', lon: 137.7705555, lat: 36.3911111, elev: 2268, rank: 200 },
+  { name: '餓鬼岳', lon: 137.7361111, lat: 36.4472222, elev: 2647, rank: 200 },
+  { name: '燕岳', lon: 137.7127777, lat: 36.4069444, elev: 2763, rank: 200 },
+  { name: '大天井岳', lon: 137.7011111, lat: 36.365, elev: 2922, rank: 200 },
+  { name: '霞沢岳', lon: 137.6405555, lat: 36.2211111, elev: 2646, rank: 200 },
+  { name: '黒姫山', lon: 138.1272222, lat: 36.8133333, elev: 2053, rank: 200 },
+  { name: '戸隠山', lon: 138.055, lat: 36.7702777, elev: 1904, rank: 200 },
+  { name: '飯縄山', lon: 138.1336111, lat: 36.7394444, elev: 1917, rank: 200 },
+  { name: '鋸岳', lon: 138.21, lat: 35.7788888, elev: 2685, rank: 200 },
+  { name: '農鳥岳', lon: 138.2369444, lat: 35.6211111, elev: 3026, rank: 200 },
+  { name: '上河内岳', lon: 138.1527777, lat: 35.3897222, elev: 2803, rank: 200 },
+  { name: '池口岳', lon: 138.0383333, lat: 35.3302777, elev: 2392, rank: 200 },
+  { name: '大無間山', lon: 138.1616666, lat: 35.2561111, elev: 2330, rank: 200 },
+  { name: '櫛形山', lon: 138.3691666, lat: 35.5866666, elev: 2052, rank: 200 },
+  { name: '笊ヶ岳', lon: 138.2594444, lat: 35.4241666, elev: 2629, rank: 200 },
+  { name: '七面山', lon: 138.3488888, lat: 35.3694444, elev: 1989, rank: 200 },
+  { name: '経ヶ岳', lon: 137.8625, lat: 35.9127777, elev: 2296, rank: 200 },
+  { name: '南駒ヶ岳', lon: 137.8108333, lat: 35.7013888, elev: 2841, rank: 200 },
+  { name: '安平路山', lon: 137.7744444, lat: 35.6305555, elev: 2363, rank: 200 },
+  { name: '小秀山', lon: 137.3969444, lat: 35.7855555, elev: 1982, rank: 200 },
+  { name: '位山', lon: 137.1966666, lat: 36.0383333, elev: 1529, rank: 200 },
+  { name: '金剛堂山', lon: 137.0488888, lat: 36.3788888, elev: 1650, rank: 200 },
+  { name: '笈ヶ岳', lon: 136.7922222, lat: 36.2986111, elev: 1841, rank: 200 },
+  { name: '大日ヶ岳', lon: 136.8377777, lat: 36.0013888, elev: 1709, rank: 200 },
+  { name: '能郷白山（権現山）', lon: 136.5141666, lat: 35.7625, elev: 1617, rank: 200 },
+  { name: '御在所山', lon: 136.4177777, lat: 35.0205555, elev: 1212, rank: 200 },
+  { name: '金剛山', lon: 135.6730555, lat: 34.4194444, elev: 1125, rank: 200 },
+  { name: '釈迦ヶ岳', lon: 135.9030555, lat: 34.1144444, elev: 1800, rank: 200 },
+  { name: '伯母小岳', lon: 135.6508333, lat: 34.0775, elev: 1344, rank: 200 },
+  { name: '武奈ヶ岳', lon: 135.8969444, lat: 35.2647222, elev: 1214, rank: 200 },
+  { name: '氷ノ山（須賀ノ山）', lon: 134.5138888, lat: 35.3538888, elev: 1510, rank: 200 },
+  { name: '蒜山（上蒜山）', lon: 133.6633333, lat: 35.325, elev: 1202, rank: 200 },
+  { name: '三瓶山（男三瓶山）', lon: 132.6216666, lat: 35.1405555, elev: 1126, rank: 200 },
+  { name: '三嶺', lon: 133.9877777, lat: 33.8394444, elev: 1894, rank: 200 },
+  { name: '東赤石山', lon: 133.375, lat: 33.875, elev: 1706, rank: 200 },
+  { name: '笹ヶ峰', lon: 133.2747222, lat: 33.8280555, elev: 1860, rank: 200 },
+  { name: '英彦山（南岳）', lon: 130.9261111, lat: 33.4761111, elev: 1199, rank: 200 },
+  { name: '雲仙岳（普賢岳）', lon: 130.2922222, lat: 32.76, elev: 1359, rank: 200 },
+  { name: '由布岳', lon: 131.3902777, lat: 33.2822222, elev: 1583, rank: 200 },
+  { name: '大崩山', lon: 131.5130555, lat: 32.7377777, elev: 1644, rank: 200 },
+  { name: '市房山', lon: 131.1011111, lat: 32.3116666, elev: 1721, rank: 200 },
+  { name: '尾鈴山', lon: 131.4266666, lat: 32.2991666, elev: 1405, rank: 200 },
+  { name: '霧島山（高千穂峰）', lon: 130.9188888, lat: 31.8863888, elev: 1574, rank: 200 },
+  { name: '御岳（北岳）', lon: 130.6547222, lat: 31.5886111, elev: 1117, rank: 200 },
+  { name: 'ニセイカウシュッペ山', lon: 142.9852777, lat: 43.78, elev: 1883, rank: 300 },
+  { name: 'オプタテシケ山', lon: 142.7516666, lat: 43.4702777, elev: 2013, rank: 300 },
+  { name: '神威岳', lon: 142.9069444, lat: 42.4283333, elev: 1600, rank: 300 },
+  { name: '余市岳', lon: 141.0197222, lat: 43.0327777, elev: 1488, rank: 300 },
+  { name: 'ニセコアンヌプリ', lon: 140.6588888, lat: 42.875, elev: 1308, rank: 300 },
+  { name: '狩場山', lon: 139.9405555, lat: 42.6133333, elev: 1520, rank: 300 },
+  { name: '大千軒岳', lon: 140.1608333, lat: 41.5794444, elev: 1072, rank: 300 },
+  { name: '五葉山', lon: 141.7322222, lat: 39.2052777, elev: 1351, rank: 300 },
+  { name: '烏帽子岳（乳頭山）', lon: 140.8386111, lat: 39.805, elev: 1478, rank: 300 },
+  { name: '太平山', lon: 140.3105555, lat: 39.7969444, elev: 1170, rank: 300 },
+  { name: '摩耶山', lon: 139.7277777, lat: 38.5202777, elev: 1020, rank: 300 },
+  { name: '祝瓶山', lon: 139.8797222, lat: 38.1975, elev: 1417, rank: 300 },
+  { name: '泉ヶ岳', lon: 140.7088888, lat: 38.4119444, elev: 1175, rank: 300 },
+  { name: '一切経山', lon: 140.2444444, lat: 37.7352777, elev: 1949, rank: 300 },
+  { name: '大滝根山', lon: 140.7016666, lat: 37.355, elev: 1192, rank: 300 },
+  { name: '粟ヶ岳', lon: 139.1886111, lat: 37.5552777, elev: 1293, rank: 300 },
+  { name: '浅草岳', lon: 139.2336111, lat: 37.3436111, elev: 1585, rank: 300 },
+  { name: '金北山', lon: 138.3497222, lat: 38.1038888, elev: 1172, rank: 300 },
+  { name: '米山', lon: 138.4838888, lat: 37.2894444, elev: 993, rank: 300 },
+  { name: '八溝山', lon: 140.2730555, lat: 36.9302777, elev: 1022, rank: 300 },
+  { name: '二岐山', lon: 139.9672222, lat: 37.2463888, elev: 1544, rank: 300 },
+  { name: '男鹿岳', lon: 139.8219444, lat: 37.0852777, elev: 1777, rank: 300 },
+  { name: '荒海山（太郎岳）', lon: 139.6436111, lat: 37.0361111, elev: 1581, rank: 300 },
+  { name: '七ヶ岳', lon: 139.6575, lat: 37.1241666, elev: 1636, rank: 300 },
+  { name: '景鶴山', lon: 139.2105555, lat: 36.9569444, elev: 2004, rank: 300 },
+  { name: '釈迦ヶ岳（高原山）', lon: 139.7766666, lat: 36.9, elev: 1795, rank: 300 },
+  { name: '太郎山', lon: 139.4827777, lat: 36.8177777, elev: 2368, rank: 300 },
+  { name: '袈裟丸山', lon: 139.3272222, lat: 36.6494444, elev: 1961, rank: 300 },
+  { name: '朝日岳', lon: 138.9725, lat: 36.8805555, elev: 1945, rank: 300 },
+  { name: '笠ヶ岳', lon: 138.4813888, lat: 36.6766666, elev: 2076, rank: 300 },
+  { name: '横手山', lon: 138.5258333, lat: 36.6688888, elev: 2307, rank: 300 },
+  { name: '諏訪山', lon: 138.7294444, lat: 36.04, elev: 1549, rank: 300 },
+  { name: '国師ヶ岳', lon: 138.6730555, lat: 35.8708333, elev: 2592, rank: 300 },
+  { name: '三頭山', lon: 139.0138888, lat: 35.7391666, elev: 1531, rank: 300 },
+  { name: '大山', lon: 139.2313888, lat: 35.4408333, elev: 1252, rank: 300 },
+  { name: '金時山', lon: 139.005, lat: 35.2897222, elev: 1212, rank: 300 },
+  { name: '神山', lon: 139.0208333, lat: 35.2333333, elev: 1438, rank: 300 },
+  { name: '黒岳', lon: 138.7494444, lat: 35.5519444, elev: 1793, rank: 300 },
+  { name: '鉢伏山', lon: 138.0591666, lat: 36.1630555, elev: 1929, rank: 300 },
+  { name: '入笠山', lon: 138.1716666, lat: 35.8963888, elev: 1955, rank: 300 },
+  { name: 'アサヨ峰', lon: 138.2413888, lat: 35.7316666, elev: 2799, rank: 300 },
+  { name: '奥茶臼山', lon: 138.0691666, lat: 35.485, elev: 2474, rank: 300 },
+  { name: '茶臼岳', lon: 138.1405555, lat: 35.3691666, elev: 2604, rank: 300 },
+  { name: '黒法師岳', lon: 138.0294444, lat: 35.1961111, elev: 2068, rank: 300 },
+  { name: '高塚山', lon: 138.0036111, lat: 35.1155555, elev: 1621, rank: 300 },
+  { name: '熊伏山', lon: 137.895, lat: 35.2633333, elev: 1654, rank: 300 },
+  { name: '山伏', lon: 138.2852777, lat: 35.3044444, elev: 2013, rank: 300 },
+  { name: '斑尾山', lon: 138.2744444, lat: 36.8375, elev: 1382, rank: 300 },
+  { name: '焼山', lon: 138.0358333, lat: 36.9208333, elev: 2400, rank: 300 },
+  { name: '青海黒姫山', lon: 137.79, lat: 36.9766666, elev: 1221, rank: 300 },
+  { name: '朝日岳', lon: 137.73, lat: 36.8266666, elev: 2418, rank: 300 },
+  { name: '唐松岳', lon: 137.7547222, lat: 36.6872222, elev: 2696, rank: 300 },
+  { name: '爺ヶ岳', lon: 137.7508333, lat: 36.5883333, elev: 2670, rank: 300 },
+  { name: '蓮華岳', lon: 137.7105555, lat: 36.5358333, elev: 2799, rank: 300 },
+  { name: '野口五郎岳', lon: 137.6377777, lat: 36.4327777, elev: 2924, rank: 300 },
+  { name: '三俣蓮華岳', lon: 137.5877777, lat: 36.39, elev: 2841, rank: 300 },
+  { name: '鍬崎山', lon: 137.4780555, lat: 36.54, elev: 2090, rank: 300 },
+  { name: '鉢盛山', lon: 137.7547222, lat: 36.0866666, elev: 2447, rank: 300 },
+  { name: '奥三界岳', lon: 137.5072222, lat: 35.6816666, elev: 1811, rank: 300 },
+  { name: '越百山', lon: 137.8033333, lat: 35.6794444, elev: 2614, rank: 300 },
+  { name: '南木曽岳', lon: 137.6441666, lat: 35.5925, elev: 1679, rank: 300 },
+  { name: '白木峰', lon: 137.1122222, lat: 36.4155555, elev: 1596, rank: 300 },
+  { name: '人形山', lon: 136.9397222, lat: 36.3488888, elev: 1726, rank: 300 },
+  { name: '医王山', lon: 136.7961111, lat: 36.5127777, elev: 939, rank: 300 },
+  { name: '大門山', lon: 136.8036111, lat: 36.3652777, elev: 1572, rank: 300 },
+  { name: '大笠山', lon: 136.7897222, lat: 36.3205555, elev: 1822, rank: 300 },
+  { name: '三方岩岳', lon: 136.8444444, lat: 36.2588888, elev: 1736, rank: 300 },
+  { name: '猿ヶ馬場山', lon: 136.9427777, lat: 36.2258333, elev: 1875, rank: 300 },
+  { name: '経ヶ岳', lon: 136.6219444, lat: 36.0463888, elev: 1625, rank: 300 },
+  { name: '野伏ヶ岳', lon: 136.7325, lat: 36.0127777, elev: 1674, rank: 300 },
+  { name: '鷲ヶ岳', lon: 136.9713888, lat: 35.9402777, elev: 1671, rank: 300 },
+  { name: '川上岳', lon: 137.1494444, lat: 36.0083333, elev: 1625, rank: 300 },
+  { name: '冠山', lon: 136.4094444, lat: 35.7797222, elev: 1257, rank: 300 },
+  { name: '藤原岳', lon: 136.4527777, lat: 35.1586111, elev: 1120, rank: 300 },
+  { name: '倶留尊山', lon: 136.1702777, lat: 34.5308333, elev: 1037, rank: 300 },
+  { name: '三峰山', lon: 136.2063888, lat: 34.4486111, elev: 1235, rank: 300 },
+  { name: '高見山', lon: 136.0883333, lat: 34.4286111, elev: 1248, rank: 300 },
+  { name: '竜門岳', lon: 135.8977777, lat: 34.4405555, elev: 904, rank: 300 },
+  { name: '護摩壇山', lon: 135.5669444, lat: 34.0575, elev: 1372, rank: 300 },
+  { name: '葛城山', lon: 135.6822222, lat: 34.4561111, elev: 959, rank: 300 },
+  { name: '蓬莱山', lon: 135.8858333, lat: 35.2094444, elev: 1174, rank: 300 },
+  { name: '大比叡（比叡山）', lon: 135.8344444, lat: 35.0658333, elev: 848, rank: 300 },
+  { name: '愛宕山', lon: 135.6341666, lat: 35.0602777, elev: 924, rank: 300 },
+  { name: '六甲山', lon: 135.2636111, lat: 34.7780555, elev: 931, rank: 300 },
+  { name: '扇ノ山', lon: 134.4408333, lat: 35.4397222, elev: 1310, rank: 300 },
+  { name: '那岐山', lon: 134.1802777, lat: 35.1716666, elev: 1255, rank: 300 },
+  { name: '道後山', lon: 133.2327777, lat: 35.0694444, elev: 1271, rank: 300 },
+  { name: '吾妻山', lon: 133.0330555, lat: 35.0680555, elev: 1239, rank: 300 },
+  { name: '伊予富士', lon: 133.2480555, lat: 33.7880555, elev: 1756, rank: 300 },
+  { name: '瓶ヶ森', lon: 133.1933333, lat: 33.7947222, elev: 1897, rank: 300 },
+  { name: '三本杭', lon: 132.6352777, lat: 33.1883333, elev: 1226, rank: 300 },
+  { name: '篠山', lon: 132.6591666, lat: 33.0558333, elev: 1065, rank: 300 },
+  { name: '背振山', lon: 130.3686111, lat: 33.4363888, elev: 1055, rank: 300 },
+  { name: '多良岳', lon: 130.0927777, lat: 32.9755555, elev: 996, rank: 300 },
+  { name: '鶴見岳', lon: 131.4297222, lat: 33.2866666, elev: 1375, rank: 300 },
+  { name: '大船山', lon: 131.2805555, lat: 33.095, elev: 1786, rank: 300 },
+  { name: '湧蓋山', lon: 131.1644444, lat: 33.14, elev: 1500, rank: 300 },
+  { name: '傾山', lon: 131.4758333, lat: 32.8388888, elev: 1605, rank: 300 },
+  { name: '国見岳', lon: 131.0183333, lat: 32.5472222, elev: 1739, rank: 300 },
+  { name: '大箆柄岳（高隈山）', lon: 130.8186111, lat: 31.4861111, elev: 1236, rank: 300 },
+  { name: '山上ヶ岳', lon: 135.9411111, lat: 34.2525, elev: 1719, rank: 300 },
+];
+
+// Labels come from the 301 famous mountains only. Personally-climbed peaks
+// that aren't on any list (御在所岳) are deliberately NOT added -- PEAKS is
+// kept above purely as the record of what's been climbed, for future use.
+const ALL_PEAKS = MEIZAN;
+
+const peakLabelsEl = document.getElementById('peakLabels');
+const peakEntries = ALL_PEAKS.map(p => ({
+  ...p,
+  pos: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.elev),
+  el: null,        // lazily-created DOM element
+  occluded: false, // set by the terrain line-of-sight pass below
+}));
+
+const EARTH_R = 6371000;
+// How far away a peak of height `h` can still poke above the horizon, and
+// symmetrically how far the camera at height `h` can see. Without this,
+// labels for mountains on the far side of the country float in the sky --
+// mathematically in front of the camera, but hidden by the earth's bulge.
+function horizonDistance(h) {
+  return Math.sqrt(Math.max(0, 2 * EARTH_R * h + h * h));
+}
+
+const MAX_PEAK_LABELS = 40; // clutter ceiling -- 100+ names at once is unreadable
+// All labels share one text row, so the names line up instead of bobbing
+// with each summit's height. The row isn't a fixed screen position though:
+// it's placed just above whichever visible peak sits highest in frame, so it
+// hugs the skyline rather than pinning to the top of the window and leaving
+// every label on a leader line hundreds of pixels long.
+const LABEL_OFFSET = 52;   // gap from the highest visible summit up to the row
+const LABEL_MIN_Y = 26;    // never put the row above this (text would leave frame)
+const LABEL_MIN_LINE = 8;  // keep a stub of leader line even when cramped
+// With every label on one row, the 45-degree baselines are all offset purely
+// by x, so plain horizontal spacing is what keeps the slanted names apart:
+// a dx gap leaves dx/sqrt(2) of perpendicular clearance between them.
+const LABEL_MIN_DX = 26;   // ~18px perpendicular clearance at 45 degrees
+// Estimating the rendered width of a label without measuring it. Reading
+// offsetWidth would force a layout for every label on every frame, so this
+// approximates instead: CJK glyphs are full-width at the 13px name font,
+// latin/digits in the smaller distance suffix are roughly half that.
+const LABEL_CJK_W = 14;
+const LABEL_DIST_W = 95;   // " 123.4 km / 3776 m" at 10px
+const LABEL_TEXT_H = 18;   // line height of the text block
+const LABEL_PAD = 8;       // slack, since the width above is only an estimate
+// How far a 45-degree label climbs above its pivot. Rotating a W x H box by
+// 45 degrees lifts its far corner by (W + H)/sqrt(2) -- the height term is
+// easy to forget and is worth roughly another 13px.
+function labelTopExtent(peak) {
+  const w = peak.name.length * LABEL_CJK_W + LABEL_DIST_W;
+  return (w + LABEL_TEXT_H) * Math.SQRT1_2 + LABEL_PAD;
+}
+// Distance fade: near peaks read at full strength, far ones recede. Costs a
+// single style write per label, and doubles as aerial perspective for the
+// text -- the labels sit in the same depth as the haze behind them instead
+// of all shouting equally loud.
+const LABEL_FADE_NEAR = 15000;   // m: full opacity at or below this
+const LABEL_FADE_FAR = 130000;   // m: fully faded to settings.labelFarOpacity
+
+// ---- Compass bearings written on the horizon.
+// Each marker is a real world position: a point on the ellipsoid at the
+// horizon distance along that bearing. Projecting it the same way peaks are
+// projected means the markers sit correctly on the skyline and respond to
+// pitch and roll for free, rather than being faked from the yaw angle.
+// 16 points rather than 8: the camera's horizontal field of view is only
+// about 60 degrees, so 45-degree spacing frequently left a single marker (or
+// none) on screen. At 22.5 degrees there are always two or three in view,
+// which is what makes them read as a scale rather than a lone signpost.
+const COMPASS_LABELS = ['N','NNE','NE','ENE','E','ESE','SE','SSE',
+                        'S','SSW','SW','WSW','W','WNW','NW','NNW'];
+const COMPASS_DIRS = COMPASS_LABELS.map((label, i) => ({
+  deg: i * 22.5,
+  label,
+  tier: i % 4 === 0 ? 'cardinal' : (i % 2 === 0 ? 'inter' : 'minor'),
+}));
+const SKY_DIR_TOP = 30;    // px from the top of the frame to the label
+const SKY_DIR_MIN_H = 34;  // never collapse the stem to nothing
+const skyCompassEl = document.getElementById('skyCompass');
+for (const d of COMPASS_DIRS) {
+  const el = document.createElement('div');
+  el.className = 'sky-dir ' + d.tier;
+  el.innerHTML = `<div class="tick top"></div><div class="lbl">${d.label}</div>`
+    + `<div class="stem"></div>`;
+  skyCompassEl.appendChild(el);
+  d.el = el;
+}
+
+// Destination point given a start, a bearing and a great-circle distance.
+function destinationPoint(latDeg, lonDeg, bearingDeg, distM) {
+  const R = EARTH_R;
+  const d = distM / R;
+  const br = Cesium.Math.toRadians(bearingDeg);
+  const lat1 = Cesium.Math.toRadians(latDeg), lon1 = Cesium.Math.toRadians(lonDeg);
+  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(br));
+  const lon2 = lon1 + Math.atan2(Math.sin(br) * Math.sin(d) * Math.cos(lat1),
+                                 Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
+  return [Cesium.Math.toDegrees(lon2), Cesium.Math.toDegrees(lat2)];
+}
+
+// NOTE: no terrain-occlusion test here, deliberately.
+//
+// These markers used to be raycast like the peak labels, and it hid every
+// single one of them. The marker point sits at ellipsoid height 0 -- sea
+// level -- while Japan's land surface is well above that, so a ray aimed at
+// it always struck terrain first and every bearing was scored as "blocked".
+// It only looked fine in testing because terrain wasn't loaded there and
+// globe.pick returned nothing.
+//
+// It isn't needed anyway: the label now hangs near the top of the frame
+// against open sky, and a bearing is worth knowing even when a mountain
+// stands in that direction. Dropping the raycast also takes real work back
+// off the frame budget.
+function updateSkyCompass(carto) {
+  const cw = viewer.canvas.clientWidth, ch = viewer.canvas.clientHeight;
+  const camPos = viewer.camera.positionWC;
+  const forward = viewer.camera.directionWC;
+  const latDeg = Cesium.Math.toDegrees(carto.latitude);
+  const lonDeg = Cesium.Math.toDegrees(carto.longitude);
+  // Put the markers out at the horizon so they read as "that way", not as a
+  // nearby object; clamped so they stay sane at very low altitude.
+  const dist = Cesium.Math.clamp(horizonDistance(Math.max(0, carto.height)), 20000, 400000);
+  const headingDeg = ((Cesium.Math.toDegrees(yaw) % 360) + 360) % 360;
+
+  for (const d of COMPASS_DIRS) {
+    // Cheap bearing test first. The camera sees about 60 degrees, so
+    // anything more than 50 off the heading cannot be on screen -- skipping
+    // those here avoids a great-circle solve and a matrix projection for
+    // roughly three quarters of the markers, every frame.
+    let delta = ((d.deg - headingDeg + 540) % 360) - 180;
+    if (Math.abs(delta) > 50) { d.el.style.display = 'none'; continue; }
+
+    const [lon2, lat2] = destinationPoint(latDeg, lonDeg, d.deg, dist);
+    const pos = Cesium.Cartesian3.fromDegrees(lon2, lat2, 0);
+    const to = Cesium.Cartesian3.subtract(pos, camPos, new Cesium.Cartesian3());
+    Cesium.Cartesian3.normalize(to, to);
+    if (Cesium.Cartesian3.dot(to, forward) <= 0) { d.el.style.display = 'none'; continue; }
+    const win = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, pos);
+    if (!win || win.x < 0 || win.x > cw || win.y < -40 || win.y > ch) {
+      d.el.style.display = 'none';
+      continue;
+    }
+
+    d.el.style.display = '';
+    d.el.style.left = win.x + 'px';
+    d.el.style.top = win.y + 'px';
+    // Bottom-anchored on the horizon point, tall enough to lift the label
+    // up near the top of the frame -- so the name reads against open sky and
+    // the stem shows exactly which point on the skyline it refers to. Guard
+    // a minimum for when the horizon itself is already high in the view.
+    d.el.style.height = Math.max(SKY_DIR_MIN_H, win.y - SKY_DIR_TOP) + 'px';
+  }
+}
+
+// ---- "Nearby peaks" list. Straight distance ranking from where you are,
+// with the compass bearing, so it doubles as "what am I looking at over
+// there". Recomputed on a timer rather than per frame -- 300 distance
+// calculations are cheap but there's no reason to redo them 60x a second.
+const COMPASS_16 = ['北','北北東','北東','東北東','東','東南東','南東','南南東',
+                    '南','南南西','南西','西南西','西','西北西','北西','北北西'];
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const p1 = Cesium.Math.toRadians(lat1), p2 = Cesium.Math.toRadians(lat2);
+  const dl = Cesium.Math.toRadians(lon2 - lon1);
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Cesium.Math.toDegrees(Math.atan2(y, x)) + 360) % 360;
+}
+
+const nearbyPanel = document.getElementById('nearbyPanel');
+const nearbyListEl = document.getElementById('nearbyList');
+document.getElementById('nearbyBtn').addEventListener('click', () => {
+  nearbyPanel.classList.toggle('open');
+  if (nearbyPanel.classList.contains('open')) updateNearbyList();
+});
+
+function updateNearbyList() {
+  if (!nearbyPanel.classList.contains('open')) return; // hidden: don't bother
+  const camPos = viewer.camera.positionWC;
+  const carto = Cesium.Cartographic.fromCartesian(camPos);
+  const latDeg = Cesium.Math.toDegrees(carto.latitude);
+  const lonDeg = Cesium.Math.toDegrees(carto.longitude);
+
+  const rows = peakEntries.map(p => ({
+    p, d: Cesium.Cartesian3.distance(p.pos, camPos),
+  })).sort((a, b) => a.d - b.d).slice(0, 25);
+
+  const html = ['<table>'];
+  for (const { p, d } of rows) {
+    const b = bearingDeg(latDeg, lonDeg, p.lat, p.lon);
+    const dir = COMPASS_16[Math.round(b / 22.5) % 16];
+    const visible = !p.occluded && p.el && p.el.style.display !== 'none';
+    html.push(
+      `<tr class="r${p.rank}">` +
+      `<td class="dir">${dir}</td>` +
+      `<td class="nm">${p.name}${visible ? ' <span class="vis">●</span>' : ''}</td>` +
+      `<td class="km">${(d / 1000).toFixed(1)}km</td>` +
+      `<td class="el">${p.elev}m</td></tr>`);
+  }
+  html.push('</table>');
+  nearbyListEl.innerHTML = html.join('');
+}
+setInterval(updateNearbyList, 700);
+
+// ---- Terrain occlusion: hide labels for peaks hidden behind nearer ridges.
+// The horizon test above only accounts for the earth's curvature; a 2000m
+// peak can still be completely blocked by a closer 2500m ridge. globe.pick
+// casts a ray at the summit and reports where terrain actually stops it.
+//
+// This is far too expensive to run per-frame for ~100 peaks, so it lives on
+// its own interval outside the render loop (same reasoning as the ground-
+// height sampling above) and tick() only ever reads the cached flag.
+// globe.pick traverses loaded terrain geometry and is genuinely expensive --
+// running it over every peak at once froze the whole app, because being
+// outside requestAnimationFrame doesn't help when JS is single-threaded and
+// the pass still hogs the main thread for tens of milliseconds. So the work
+// is amortised: each invocation raycasts at most OCCLUSION_BUDGET peaks and
+// resumes where it left off, sweeping the full list over a couple of
+// seconds. Labels lagging reality by a second or two is unnoticeable;
+// dropped frames are not.
+const OCCLUSION_INTERVAL = 200;
+const OCCLUSION_BUDGET = 3;
+let occlusionCursor = 0;
+
+setInterval(() => {
+  const globe = viewer.scene.globe;
+  if (!globe || !settings.occlusionTest) return;
+  const camPos = viewer.camera.positionWC;
+  const camCarto = Cesium.Cartographic.fromCartesian(camPos);
+  const camHorizon = horizonDistance(Math.max(0, camCarto.height));
+  const forward = viewer.camera.directionWC;
+  const cw = viewer.canvas.clientWidth, ch = viewer.canvas.clientHeight;
+
+  let budget = OCCLUSION_BUDGET;
+  // Walk the list from wherever the last invocation stopped, spending the
+  // budget only on peaks that actually need a raycast.
+  for (let n = 0; n < peakEntries.length && budget > 0; n++) {
+    const peak = peakEntries[occlusionCursor];
+    occlusionCursor = (occlusionCursor + 1) % peakEntries.length;
+    // `occluded` means one thing only: terrain is known to block the line of
+    // sight. Every other reason to skip the raycast below (off screen,
+    // behind the camera, past the horizon) is re-tested per-frame in
+    // updatePeakLabels, so those cases clear the flag rather than setting
+    // it -- conflating the two made every label vanish whenever the canvas
+    // reported a zero size.
+    const toPeak = Cesium.Cartesian3.subtract(peak.pos, camPos, new Cesium.Cartesian3());
+    const distance = Cesium.Cartesian3.magnitude(toPeak);
+    if (distance > camHorizon + horizonDistance(peak.elev)) { peak.occluded = false; continue; }
+    const dir = Cesium.Cartesian3.normalize(toPeak, new Cesium.Cartesian3());
+    if (Cesium.Cartesian3.dot(dir, forward) <= 0) { peak.occluded = false; continue; }
+    if (cw > 0 && ch > 0) {
+      const win = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, peak.pos);
+      if (!win || win.x < 0 || win.x > cw || win.y < 0 || win.y > ch) { peak.occluded = false; continue; }
+    }
+
+    budget--; // only the raycast itself is worth rationing
+    const hit = globe.pick(new Cesium.Ray(camPos, dir), viewer.scene);
+    if (!hit) {
+      // No intersection reported usually means terrain there isn't loaded
+      // yet -- err toward showing the label rather than flickering it off.
+      peak.occluded = false;
+      continue;
+    }
+    // The summit is itself made of terrain, so the ray always lands at
+    // roughly the peak's own distance. Only count it as blocked when
+    // something stops the ray meaningfully short of that, with the
+    // tolerance scaling by range since far tiles are coarser.
+    const hitDist = Cesium.Cartesian3.distance(camPos, hit);
+    peak.occluded = hitDist < distance - Math.max(300, distance * 0.02);
+  }
+}, OCCLUSION_INTERVAL);
+
+function updatePeakLabels() {
+  const canvas = viewer.canvas;
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  const camPos = viewer.camera.positionWC;
+  const camCarto = Cesium.Cartographic.fromCartesian(camPos);
+  const camHorizon = horizonDistance(Math.max(0, camCarto.height));
+  const forward = viewer.camera.directionWC;
+
+  const candidates = [];
+  for (const peak of peakEntries) {
+    // Blocked by terrain (computed on its own interval, see above).
+    if (peak.occluded) continue;
+
+    const toPeak = Cesium.Cartesian3.subtract(peak.pos, camPos, new Cesium.Cartesian3());
+    const distance = Cesium.Cartesian3.magnitude(toPeak);
+
+    // Beyond the combined horizon the peak is behind the earth's curve.
+    if (distance > camHorizon + horizonDistance(peak.elev)) continue;
+
+    // Only project peaks that are actually in front of the camera (a peak
+    // behind the camera can still mathematically project to an in-bounds
+    // window coordinate -- worldToWindowCoordinates doesn't know "behind"
+    // from "in front" on its own).
+    const dot = Cesium.Cartesian3.dot(Cesium.Cartesian3.normalize(toPeak, new Cesium.Cartesian3()), forward);
+    if (dot <= 0) continue;
+    const win = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, peak.pos);
+    if (!win || win.x < 0 || win.x > cw || win.y < 0 || win.y > ch) continue;
+
+    candidates.push({ peak, win, distance });
+  }
+
+  // Greedy placement by fame first: when two names would collide, the more
+  // celebrated peak keeps its label -- climbed (0), then 百名山, 二百名山,
+  // 三百名山. Distance only breaks ties within the same list, where the
+  // nearer summit wins because it's the one you can actually pick out.
+  candidates.sort((a, b) => a.peak.rank - b.peak.rank || a.distance - b.distance);
+
+  const shown = [];
+  for (const cand of candidates) {
+    if (shown.length >= MAX_PEAK_LABELS) break;
+    if (shown.some(s => Math.abs(s.win.x - cand.win.x) < LABEL_MIN_DX)) continue;
+    shown.push(cand);
+  }
+
+  // One shared row for every label, sitting just above the highest peak
+  // that's actually on screen.
+  let rowY = LABEL_MIN_Y;
+  if (shown.length) {
+    let highest = Infinity;
+    for (const s of shown) if (s.win.y < highest) highest = s.win.y;
+    rowY = Math.max(LABEL_MIN_Y, highest - LABEL_OFFSET);
+  }
+
+  // Push the row down far enough that the tallest diagonal still fits under
+  // the top edge. Lowering the row only shortens leader lines, so this costs
+  // nothing visually and saves labels that would otherwise have to be culled.
+  let maxTop = 0;
+  for (const s of shown) {
+    const t = labelTopExtent(s.peak);
+    if (t > maxTop) maxTop = t;
+  }
+  rowY = Math.max(rowY, maxTop);
+
+  // Only the TOP edge is enforced. Running past the left or right edge is
+  // fine -- the name stays readable and the peak keeps its label -- whereas
+  // a label that climbs out of the top takes its text off screen entirely
+  // and leaves an orphaned leader line pointing at nothing.
+  //
+  // The pivot is NOT always on the row: a peak sitting above the row keeps
+  // only a stub of leader line, so its text starts just above the summit.
+  for (let i = shown.length - 1; i >= 0; i--) {
+    const s = shown[i];
+    const pivotY = Math.min(rowY, s.win.y - LABEL_MIN_LINE);
+    if (pivotY - labelTopExtent(s.peak) < 0) shown.splice(i, 1);
+  }
+
+  const shownSet = new Set(shown.map(c => c.peak));
+
+  for (const peak of peakEntries) {
+    if (!shownSet.has(peak) && peak.el) peak.el.style.display = 'none';
+  }
+
+  for (const { peak, win, distance } of shown) {
+    if (!peak.el) {
+      const el = document.createElement('div');
+      el.className = 'peak-label';
+      el.innerHTML = `<span class="rot"><span class="name"></span><span class="dist"></span></span>`
+        + `<span class="line"></span><span class="dot"></span>`;
+      peakLabelsEl.appendChild(el);
+      peak.el = el;
+      // Cache the child refs once. Re-running querySelector for all four
+      // parts of every label on every frame was pure waste, and it scaled
+      // straight up with the label count.
+      peak.elRot = el.querySelector('.rot');
+      peak.elName = el.querySelector('.name');
+      peak.elDist = el.querySelector('.dist');
+      peak.elLine = el.querySelector('.line');
+      peak.lastName = null;
+      peak.lastOpacity = null;
+      peak.lastFlip = null;
+    }
+    peak.el.style.display = '';
+    // The element is a zero-size anchor sitting exactly on the summit.
+    peak.el.style.left = win.x + 'px';
+    peak.el.style.top = win.y + 'px';
+    // The name never changes for a given peak -- only write it once.
+    if (peak.lastName !== peak.name) {
+      peak.elName.textContent = peak.name;
+      peak.lastName = peak.name;
+    }
+    peak.elDist.textContent = `${(distance / 1000).toFixed(1)} km / ${peak.elev} m`;
+    // Fade with distance. Quantised to 2dp so a slowly-changing value doesn't
+    // dirty the element's style on every single frame.
+    const t = Cesium.Math.clamp(
+      (distance - LABEL_FADE_NEAR) / (LABEL_FADE_FAR - LABEL_FADE_NEAR), 0, 1);
+    const opacity = Math.round((1 - t * (1 - settings.labelFarOpacity)) * 100) / 100;
+    if (peak.lastOpacity !== opacity) {
+      peak.el.style.opacity = opacity;
+      peak.lastOpacity = opacity;
+    }
+    // Leader line runs from the summit up to the shared row; the slanted
+    // text then takes off from the top of that line.
+    const lineH = Math.max(LABEL_MIN_LINE, win.y - rowY);
+    peak.elLine.style.height = lineH + 'px';
+    peak.elRot.style.bottom = lineH + 'px';
+  }
+}
+
+// ---- SpaceMouse (WebHID) -> continuous 6DOF camera velocity ----
+// Raw SpaceNavigator axis values arrive roughly in [-350, 350]; we normalize
+// and treat them as a flight-stick: hold to keep moving/turning, release to
+// stop -- no orbit pivot, no re-centering, so nothing "jumps".
+let sm = {x:0, y:0, z:0, rx:0, ry:0, rz:0};
+const AXIS_MAX = 350;
+
+// Explicit camera orientation state (see tick() for why: avoids gimbal-lock
+// style instability from accumulating rotations via repeated cam.look()).
+// Matches the initial setView below: heading=0 (north) -> yaw=0, pitch=-45°.
+let yaw = 0;
+let pitch = Cesium.Math.toRadians(-45);
+
+// ---- tunable settings: live-adjustable via the settings panel, persisted
+// to localStorage so they survive reloads ----
+const DEFAULTS = {
+  moveSpeed: 50,      // minimum m/s at full deflection -- just keeps things
+                       // controllable right near the ground; speed relative
+                       // to the ground is meant to come from altFactor below
+  altFactor: 0.6,      // speed = altitude * altFactor -- makes ground-relative
+                       // speed roughly constant regardless of altitude (crossing
+                       // "one screen's worth of ground" takes about the same
+                       // time whether high up or low down)
+  rotSpeed: 1.2,      // rad/s at full deflection
+  deadzone: 0.06,
+  maxResolutionScale: 0.65,  // ceiling for the adaptive resolution scaler below
+  minResolutionScale: 0.12,  // floor for the adaptive scaler -- deliberately
+                             // very low, so holding 30fps is always possible
+  minimapZoom: 8,            // web-mercator zoom level of the minimap
+  terrainDetail: 1.0,        // best terrain screen-space error (smaller = finer)
+  occlusionTest: true,       // hide labels for peaks blocked by terrain
+  labelFarOpacity: 0.3,      // opacity of the most distant labels (0 = fade out)
+  japanOnly: true,           // don't render globe outside Japan at all
+  imagery: 'opentopo',       // surface texture, see IMAGERY_OPTIONS
+  fogDensity: 0.5,           // multiplier on Cesium's default haze; 0 = off
+  sunLighting: false,        // shade terrain by real sun position
+  timeOfDay: 10,             // hours, JST, used when sunLighting is on
+};
+let settings = { ...DEFAULTS };
+try {
+  const saved = JSON.parse(localStorage.getItem('mountainFlightSettings') || '{}');
+  settings = { ...DEFAULTS, ...saved };
+} catch (e) { /* ignore corrupt storage */ }
+
+function saveSettings() {
+  localStorage.setItem('mountainFlightSettings', JSON.stringify(settings));
+}
+
+// ---- Adaptive resolution scaling: rendering cost on this weak integrated
+// GPU is dominated by fill-rate (per-pixel shading of fog/lighting/terrain),
+// which scales with window AREA -- a bigger window is directly more GPU work
+// even though the scene itself hasn't changed. Rather than a fixed
+// resolutionScale that's wastefully low on a small window and too high on a
+// big one, ease it up/down each second to hold a target FPS, capped at the
+// user's quality-ceiling slider.
+// A bigger window costs more on two fronts. The obvious one is fill rate:
+// twice the pixels is twice the per-pixel shading. The less obvious one is
+// that maximumScreenSpaceError is measured in PIXELS, so at a fixed setting
+// a larger window demands finer terrain tiles to hold the same per-pixel
+// error -- more geometry and more tile requests, not just more shading.
+//
+// Rather than capping resolution by window size (which would penalise a big
+// window even when the GPU is keeping up fine), the controller below reacts
+// to measured load: the further FPS falls short, the harder it cuts. A large
+// window that runs fine keeps full quality; one that struggles gets reduced
+// in proportion to how badly it's struggling.
+let currentResolutionScale = settings.maxResolutionScale;
+viewer.resolutionScale = currentResolutionScale;
+
+// Terrain level-of-detail, adaptive on the same loop. maximumScreenSpaceError
+// is an ERROR budget, so SMALLER = finer terrain: settings.terrainDetail is
+// the best (sharpest) we'll ask for, TERRAIN_SSE_WORST the coarsest we'll
+// fall back to when the framerate can't keep up.
+const TERRAIN_SSE_WORST = 12;
+let currentTerrainSSE = settings.terrainDetail;
+viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+
+const SLIDER_DEFS = [
+  { key: 'moveSpeed', slider: 's_moveSpeed', value: 'v_moveSpeed', fmt: v => v.toFixed(0) + ' m/s' },
+  { key: 'altFactor', slider: 's_altFactor', value: 'v_altFactor', fmt: v => v.toFixed(2) },
+  { key: 'rotSpeed',  slider: 's_rotSpeed',  value: 'v_rotSpeed',  fmt: v => v.toFixed(2) },
+  { key: 'deadzone',  slider: 's_deadzone',  value: 'v_deadzone',  fmt: v => v.toFixed(2) },
+  { key: 'maxResolutionScale', slider: 's_maxResolutionScale', value: 'v_maxResolutionScale', fmt: v => Math.round(v * 100) + '%' },
+  { key: 'minResolutionScale', slider: 's_minResolutionScale', value: 'v_minResolutionScale', fmt: v => Math.round(v * 100) + '%' },
+  { key: 'minimapZoom', slider: 's_minimapZoom', value: 'v_minimapZoom', fmt: v => 'z' + v.toFixed(0) },
+  { key: 'terrainDetail', slider: 's_terrainDetail', value: 'v_terrainDetail', fmt: v => v.toFixed(1) },
+  { key: 'labelFarOpacity', slider: 's_labelFarOpacity', value: 'v_labelFarOpacity', fmt: v => Math.round(v * 100) + '%' },
+  { key: 'fogDensity', slider: 's_fogDensity', value: 'v_fogDensity', fmt: v => v === 0 ? 'なし' : v.toFixed(2) },
+  { key: 'timeOfDay', slider: 's_timeOfDay', value: 'v_timeOfDay', fmt: v => {
+      const hh = Math.floor(v), mm = Math.round((v - hh) * 60);
+      return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
+    } },
+];
+
+function refreshSettingsUI() {
+  for (const d of SLIDER_DEFS) {
+    document.getElementById(d.slider).value = settings[d.key];
+    document.getElementById(d.value).textContent = d.fmt(settings[d.key]);
+  }
+  document.getElementById('c_occlusion').checked = settings.occlusionTest;
+  document.getElementById('c_japanOnly').checked = settings.japanOnly;
+  document.getElementById('c_sunLighting').checked = settings.sunLighting;
+  document.getElementById('s_imagery').value = settings.imagery;
+}
+// Yes: rendering the rest of the world does cost. Looking at the horizon
+// throws a frustum thousands of km deep, and Cesium dutifully streams coarse
+// tiles across everything inside it -- Korea, China, open Pacific -- none of
+// which this app has any use for. cartographicLimitRectangle clips the globe
+// to a rectangle, so those tiles are never requested or drawn at all.
+// ---- Day/night. Cesium already knows where the sun is for any given
+// instant, so "time of day" is really just moving the clock: globe lighting
+// then shades terrain by the real sun angle. That makes low morning/evening
+// light rake across the ridges the way it did on the actual walk, which is
+// far more revealing of shape than flat midday light.
+//
+// The date is pinned and the clock frozen (shouldAnimate = false) so the
+// scene doesn't quietly drift while you fly around.
+const SKY_KEYFRAMES = [ // hour (JST) -> background/horizon colour
+  [0,  '#070b16'], [4,  '#0d1526'], [5.5,'#3a4a6b'], [6.5,'#c2764f'],
+  [8,  '#8fc6ea'], [16, '#8fc6ea'], [17.5,'#d1834f'], [19,'#2c3555'],
+  [20, '#0d1526'], [24, '#070b16'],
+];
+function skyColorForHour(h) {
+  let a = SKY_KEYFRAMES[0], b = SKY_KEYFRAMES[SKY_KEYFRAMES.length - 1];
+  for (let i = 0; i < SKY_KEYFRAMES.length - 1; i++) {
+    if (h >= SKY_KEYFRAMES[i][0] && h <= SKY_KEYFRAMES[i + 1][0]) {
+      a = SKY_KEYFRAMES[i]; b = SKY_KEYFRAMES[i + 1]; break;
+    }
+  }
+  const span = b[0] - a[0];
+  const t = span > 0 ? (h - a[0]) / span : 0;
+  return Cesium.Color.lerp(
+    Cesium.Color.fromCssColorString(a[1]),
+    Cesium.Color.fromCssColorString(b[1]), t, new Cesium.Color());
+}
+
+function applySunLighting() {
+  const globe = viewer.scene.globe;
+  globe.enableLighting = settings.sunLighting;
+  if (settings.sunLighting) {
+    // JST is UTC+9; pin a date so only the hour matters.
+    const utcMs = Date.UTC(2026, 7, 14, 0, 0, 0) + (settings.timeOfDay - 9) * 3600e3;
+    viewer.clock.currentTime = Cesium.JulianDate.fromDate(new Date(utcMs));
+    viewer.clock.shouldAnimate = false;
+    viewer.scene.backgroundColor = skyColorForHour(settings.timeOfDay);
+  } else {
+    viewer.scene.backgroundColor = Cesium.Color.fromCssColorString('#8fc6ea');
+  }
+  viewer.scene.requestRender();
+}
+applySunLighting();
+document.getElementById('c_sunLighting').addEventListener('change', (e) => {
+  settings.sunLighting = e.target.checked;
+  saveSettings();
+  applySunLighting();
+});
+// NOTE: the s_timeOfDay listener is registered further down, AFTER the
+// generic SLIDER_DEFS loop. Registered here it fired first and read the
+// previous value of settings.timeOfDay, leaving the sky one keyframe behind.
+
+const JAPAN_RECT = Cesium.Rectangle.fromDegrees(122.0, 23.0, 154.0, 46.5);
+function applyJapanOnly() {
+  viewer.scene.globe.cartographicLimitRectangle =
+    settings.japanOnly ? JAPAN_RECT : Cesium.Rectangle.MAX_VALUE;
+}
+applyJapanOnly();
+applyFog();
+
+const imagerySelect = document.getElementById('s_imagery');
+for (const o of IMAGERY_OPTIONS) {
+  imagerySelect.appendChild(Object.assign(document.createElement('option'),
+    { value: o.id, textContent: o.label }));
+}
+imagerySelect.value = settings.imagery;
+imagerySelect.addEventListener('change', (e) => {
+  settings.imagery = e.target.value;
+  saveSettings();
+  applyImagery();
+});
+applyImagery();
+document.getElementById('c_japanOnly').addEventListener('change', (e) => {
+  settings.japanOnly = e.target.checked;
+  saveSettings();
+  applyJapanOnly();
+});
+document.getElementById('c_occlusion').addEventListener('change', (e) => {
+  settings.occlusionTest = e.target.checked;
+  saveSettings();
+  // Turning it off must clear any stale flags, or peaks hidden at the moment
+  // it was switched off would stay hidden forever.
+  if (!settings.occlusionTest) for (const p of peakEntries) p.occluded = false;
+});
+for (const d of SLIDER_DEFS) {
+  document.getElementById(d.slider).addEventListener('input', (e) => {
+    settings[d.key] = parseFloat(e.target.value);
+    document.getElementById(d.value).textContent = d.fmt(settings[d.key]);
+    saveSettings();
+  });
+}
+document.getElementById('s_maxResolutionScale').addEventListener('input', () => {
+  if (settings.minResolutionScale > settings.maxResolutionScale) {
+    settings.minResolutionScale = settings.maxResolutionScale;
+    saveSettings();
+    refreshSettingsUI();
+  }
+  if (currentResolutionScale > settings.maxResolutionScale) {
+    currentResolutionScale = settings.maxResolutionScale;
+    viewer.resolutionScale = currentResolutionScale;
+  }
+});
+document.getElementById('s_minResolutionScale').addEventListener('input', () => {
+  if (settings.maxResolutionScale < settings.minResolutionScale) {
+    settings.maxResolutionScale = settings.minResolutionScale;
+    saveSettings();
+    refreshSettingsUI();
+  }
+  if (currentResolutionScale < settings.minResolutionScale) {
+    currentResolutionScale = settings.minResolutionScale;
+    viewer.resolutionScale = currentResolutionScale;
+  }
+});
+document.getElementById('s_timeOfDay').addEventListener('input', applySunLighting);
+document.getElementById('s_fogDensity').addEventListener('input', applyFog);
+document.getElementById('s_terrainDetail').addEventListener('input', () => {
+  // Apply immediately rather than waiting for the adaptive loop to walk
+  // there, so dragging the slider shows its effect right away.
+  currentTerrainSSE = settings.terrainDetail;
+  viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+  settings = { ...DEFAULTS };
+  saveSettings();
+  refreshSettingsUI();
+  currentResolutionScale = settings.maxResolutionScale;
+  viewer.resolutionScale = currentResolutionScale;
+  applyJapanOnly();
+  applyFog();
+  applyImagery();
+  currentTerrainSSE = settings.terrainDetail;
+  viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+});
+document.getElementById('settingsBtn').addEventListener('click', () => {
+  document.getElementById('settingsPanel').classList.toggle('open');
+});
+refreshSettingsUI();
+
+function deadzone(v) { return Math.abs(v) < settings.deadzone ? 0 : v; }
+
+document.getElementById('connectBtn').addEventListener('click', async () => {
+  const statusEl = document.getElementById('status');
+  if (!('hid' in navigator)) {
+    statusEl.textContent = 'WebHID非対応ブラウザです';
+    statusEl.className = 'bad';
+    return;
+  }
+  try {
+    const devices = await navigator.hid.requestDevice({ filters: [{ vendorId: 0x046d }] });
+    if (devices.length === 0) { statusEl.textContent = '未選択'; statusEl.className = 'bad'; return; }
+    const device = devices[0];
+    await device.open();
+    statusEl.textContent = '接続: ' + device.productName;
+    statusEl.className = 'ok';
+    device.addEventListener('inputreport', (event) => {
+      const d = event.data;
+      if (event.reportId === 1 && d.byteLength >= 6) {
+        sm.x = deadzone(d.getInt16(0, true) / AXIS_MAX);
+        sm.y = deadzone(d.getInt16(2, true) / AXIS_MAX);
+        sm.z = deadzone(d.getInt16(4, true) / AXIS_MAX);
+      } else if (event.reportId === 2 && d.byteLength >= 6) {
+        sm.rx = deadzone(d.getInt16(0, true) / AXIS_MAX);
+        sm.ry = deadzone(d.getInt16(2, true) / AXIS_MAX);
+        sm.rz = deadzone(d.getInt16(4, true) / AXIS_MAX);
+      }
+    });
+  } catch (e) {
+    statusEl.textContent = 'エラー: ' + e.message;
+    statusEl.className = 'bad';
+  }
+});
+
+// ---- per-frame camera update: pure flight-stick integration, no pivot ----
+let lastTime = performance.now();
+let fpsSmoothed = 60;
+let lastResScaleCheck = performance.now();
+let slowFrameStreak = 0;
+const FPS_TARGET = 30;   // below this, start giving up quality
+const FPS_RECOVER = 36;  // above this, start claiming it back
+let qualitySettle = 0;   // frames to ignore after a resolution change
+let idleMs = 0;          // how long the camera has been sitting still
+
+// Single place that changes resolutionScale, so the settle window can never
+// be forgotten at one of the call sites.
+function setResolutionScale(v) {
+  const next = Cesium.Math.clamp(v, settings.minResolutionScale, settings.maxResolutionScale);
+  if (Math.abs(next - currentResolutionScale) < 1e-4) return;
+  currentResolutionScale = next;
+  viewer.resolutionScale = next;
+  qualitySettle = 4;
+}
+// globe.getHeight() isn't free once real terrain tiles are involved. Even
+// throttled, calling it FROM the render loop (tick/rAF) still occasionally
+// stalls a frame right when it runs, which shows up as periodic judder no
+// amount of smoothing the resulting NUMBER can fix -- the frame time itself
+// is what's uneven. Moved the sampling to its own setInterval, fully outside
+// the render loop, so it can never block a rendered frame; tick() only ever
+// reads the last sampled value and smoothly eases toward it.
+let targetHeightAboveGround = 0;
+let smoothedHeightAboveGround = 0;
+setInterval(() => {
+  const carto = Cesium.Cartographic.fromCartesian(viewer.camera.position);
+  const groundHeight = viewer.scene.globe.getHeight(carto) ?? 0;
+  targetHeightAboveGround = Math.max(0, carto.height - groundHeight);
+}, 150);
+
+function tick() {
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.1);
+  lastTime = now;
+
+  const cam = viewer.camera;
+
+  // Ease toward the (separately-sampled) target rather than snapping.
+  smoothedHeightAboveGround += (targetHeightAboveGround - smoothedHeightAboveGround) * Math.min(1, dt * 3);
+  const heightAboveGround = smoothedHeightAboveGround;
+  const carto = Cesium.Cartographic.fromCartesian(cam.position);
+
+  // ---- Rotation: explicit yaw/pitch state, rebuilt from the local East-
+  // North-Up frame every frame -- NOT accumulated via repeated cam.look()
+  // calls. The old look()-based approach round-tripped through the camera's
+  // current orientation each frame, which drifts/becomes unstable exactly
+  // when looking near straight-down (classic gimbal-lock symptom: erratic
+  // roll). Keeping yaw/pitch as independent numbers and reconstructing
+  // direction/up from them fresh every frame makes that class of bug
+  // impossible by construction. Pitch is clamped just short of vertical
+  // (90.5°) since roll is genuinely undefined at EXACTLY straight down/up,
+  // in any representation -- not a bug, a real singularity everyone works
+  // around this way (flight sims included).
+  yaw += sm.rz * settings.rotSpeed * dt;
+
+  // Ease into the pitch limit instead of hard-clamping: hitting a hard wall
+  // at ±89.5° felt like a sudden jolt (input kept going, motion just
+  // stopped dead). Scaling the delta down as pitch nears the limit gives a
+  // smooth deceleration instead, while still avoiding the true singularity
+  // at exactly ±90°.
+  const PITCH_LIMIT = Cesium.Math.toRadians(89.95); // exactly 90° is the true singularity; this is close enough to feel like straight down
+  const PITCH_EASE_MARGIN = Cesium.Math.toRadians(15);
+  let pitchDelta = sm.rx * settings.rotSpeed * dt; // sign flipped: felt reversed to the user
+  if (pitchDelta > 0) {
+    const remaining = Cesium.Math.clamp((PITCH_LIMIT - pitch) / PITCH_EASE_MARGIN, 0, 1);
+    pitchDelta *= remaining;
+  } else if (pitchDelta < 0) {
+    const remaining = Cesium.Math.clamp((pitch + PITCH_LIMIT) / PITCH_EASE_MARGIN, 0, 1);
+    pitchDelta *= remaining;
+  }
+  pitch = Cesium.Math.clamp(pitch + pitchDelta, -PITCH_LIMIT, PITCH_LIMIT);
+
+  const enu = Cesium.Transforms.eastNorthUpToFixedFrame(cam.positionWC);
+  const east = Cesium.Matrix4.getColumn(enu, 0, new Cesium.Cartesian3());
+  const north = Cesium.Matrix4.getColumn(enu, 1, new Cesium.Cartesian3());
+  const zenith = Cesium.Matrix4.getColumn(enu, 2, new Cesium.Cartesian3());
+
+  // direction = horizontal component (yaw-rotated east/north blend) tilted
+  // up/down by pitch toward zenith.
+  const horiz = Cesium.Cartesian3.add(
+    Cesium.Cartesian3.multiplyByScalar(east, Math.sin(yaw), new Cesium.Cartesian3()),
+    Cesium.Cartesian3.multiplyByScalar(north, Math.cos(yaw), new Cesium.Cartesian3()),
+    new Cesium.Cartesian3()
+  );
+  const direction = Cesium.Cartesian3.normalize(Cesium.Cartesian3.add(
+    Cesium.Cartesian3.multiplyByScalar(horiz, Math.cos(pitch), new Cesium.Cartesian3()),
+    Cesium.Cartesian3.multiplyByScalar(zenith, Math.sin(pitch), new Cesium.Cartesian3()),
+    new Cesium.Cartesian3()
+  ), new Cesium.Cartesian3());
+  const right = Cesium.Cartesian3.normalize(
+    Cesium.Cartesian3.cross(direction, zenith, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+  const up = Cesium.Cartesian3.normalize(
+    Cesium.Cartesian3.cross(right, direction, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+
+  // ---- Translation: world/yaw-based basis, not the pitch-tilted local
+  // look direction. Forward/back/left/right move on the horizontal plane
+  // (yaw only -- pitch is ignored), and up/down is always true vertical.
+  // This means looking down at the ground to examine it doesn't also make
+  // "forward" dive toward it -- movement and where you're looking are
+  // decoupled, which reads as more "world-anchored". Speed scales with
+  // altitude so ground-relative speed stays roughly constant regardless of
+  // how high up we are.
+  const worldRight = Cesium.Cartesian3.normalize(
+    Cesium.Cartesian3.cross(horiz, zenith, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+  if (sm.x || sm.y || sm.z) {
+    // heightAboveGround computed once at the top of tick() (not sea-level
+    // altitude) -- matters near mountains, e.g. hovering just above Fuji's
+    // ~3776m peak should feel like being near the ground and slow down.
+    const speed = settings.moveSpeed + heightAboveGround * settings.altFactor;
+    const delta = new Cesium.Cartesian3();
+    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(worldRight, sm.x * speed * dt, new Cesium.Cartesian3()), delta);
+    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(zenith, -sm.z * speed * dt, new Cesium.Cartesian3()), delta);
+    Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(horiz, -sm.y * speed * dt, new Cesium.Cartesian3()), delta);
+    Cesium.Cartesian3.add(cam.position, delta, cam.position);
+  }
+
+  cam.setView({ orientation: { direction, up } });
+
+  document.getElementById('alt').textContent =
+    `${carto.height.toFixed(0)} (地表から ${heightAboveGround.toFixed(0)})`;
+  const curSpeed = settings.moveSpeed + heightAboveGround * settings.altFactor;
+  document.getElementById('speed').textContent =
+    (Math.hypot(sm.x, sm.y, sm.z) * curSpeed).toFixed(1);
+  document.getElementById('rawvals').textContent =
+    `x=${sm.x.toFixed(2)} y=${sm.y.toFixed(2)} z=${sm.z.toFixed(2)} | rx=${sm.rx.toFixed(2)} ry=${sm.ry.toFixed(2)} rz=${sm.rz.toFixed(2)}`;
+
+  // FPS (smoothed) tells us if rendering itself is the bottleneck; pending
+  // tile requests tell us if we're instead waiting on network/tile loading.
+  // Distinguishing the two was previously just a guess.
+  const instFps = dt > 0 ? 1 / dt : 60;
+  // Changing resolutionScale forces Cesium to reallocate its framebuffers,
+  // which costs one visibly slow frame. Measuring that frame would be
+  // self-defeating: the drop-side smoothing below is deliberately violent,
+  // so the cost of raising quality got mistaken for the scene being too
+  // heavy, which blocked the next raise. That feedback loop is why quality
+  // never climbed back after the view came to rest. Skip a few frames after
+  // any change and let the pipeline settle before trusting the numbers.
+  // Is the camera actually being flown right now? Framerate only matters
+  // while something is moving; once the view is parked, a sharp picture is
+  // worth far more than headroom nobody is using.
+  const moving = !!(sm.x || sm.y || sm.z || sm.rx || sm.ry || sm.rz);
+  idleMs = moving ? 0 : idleMs + dt * 1000;
+  const parked = idleMs > 350;
+
+  if (qualitySettle > 0) {
+    qualitySettle--;
+  } else {
+    // Asymmetric smoothing: react fast to a drop, slowly to a recovery. A
+    // symmetric average hides short stalls behind the good frames either
+    // side of them, which is exactly when we most want to have cut back.
+    fpsSmoothed += (instFps - fpsSmoothed) * (instFps < fpsSmoothed ? 0.4 : 0.05);
+
+    // Fast path: 30 fps is treated as a floor to defend, not a target to
+    // drift around, so any frame that misses it starts cutting immediately
+    // rather than waiting for the half-second controller. The step scales
+    // with how badly the frame missed, so a severe stall collapses the
+    // resolution in a couple of frames instead of easing down over seconds.
+    // Disabled while parked, where slow frames buy detail nobody is fighting.
+    if (!parked && instFps < FPS_TARGET && currentResolutionScale > settings.minResolutionScale) {
+      slowFrameStreak++;
+      if (slowFrameStreak >= 2) {
+        slowFrameStreak = 0;
+        const miss = Cesium.Math.clamp((FPS_TARGET - instFps) / FPS_TARGET, 0, 1);
+        setResolutionScale(currentResolutionScale - (0.05 + 0.25 * miss));
+      }
+    } else {
+      slowFrameStreak = 0;
+    }
+  }
+  document.getElementById('fps').textContent = fpsSmoothed.toFixed(0);
+  document.getElementById('pendingTiles').textContent = Cesium.RequestScheduler.statistics.numberOfActiveRequests;
+
+  // Twice a second, trade quality for framerate or claim it back. Cut hard
+  // and fast when short (both dials at once -- holding the framerate beats
+  // either, and the loss is temporary); restore gently, resolution first,
+  // then terrain detail.
+  //
+  // The two thresholds are deliberately close together. An earlier version
+  // cut below 30 but only restored above 45, which left a dead band: a scene
+  // sitting at any steady 30-45 fps satisfied neither branch and simply
+  // stayed at whatever reduced quality it had fallen to, forever.
+  if (qualitySettle === 0 && now - lastResScaleCheck > 500) {
+    lastResScaleCheck = now;
+    // How far short of target we are, 0..1. Steps scale with this so a heavy
+    // scene is cut back quickly while something only slightly short is
+    // nudged gently instead of over-correcting.
+    const deficit = Cesium.Math.clamp((FPS_TARGET - fpsSmoothed) / FPS_TARGET, 0, 1);
+    if (parked) {
+      // Parked: climb back to full quality unconditionally. Recovery used to
+      // be gated on reaching a target framerate, so on a machine that can't
+      // hit it even at minimum resolution the picture stayed pinned at its
+      // worst forever -- the harder the GPU struggled, the more permanent
+      // the degradation became. Standing still is precisely when framerate
+      // stops mattering, so nothing here is gated on it.
+      if (currentResolutionScale < settings.maxResolutionScale) {
+        setResolutionScale(currentResolutionScale + 0.05);
+      } else if (currentTerrainSSE > settings.terrainDetail) {
+        currentTerrainSSE = Math.max(settings.terrainDetail, currentTerrainSSE - 0.5);
+        viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+      }
+    } else if (fpsSmoothed < FPS_TARGET) {
+      if (currentTerrainSSE < TERRAIN_SSE_WORST) {
+        currentTerrainSSE = Math.min(TERRAIN_SSE_WORST, currentTerrainSSE + 0.5 + 3 * deficit);
+        viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+      }
+      setResolutionScale(currentResolutionScale - (0.05 + 0.2 * deficit));
+    } else if (fpsSmoothed > FPS_RECOVER) {
+      if (currentResolutionScale < settings.maxResolutionScale) {
+        setResolutionScale(currentResolutionScale + 0.05);
+      } else if (currentTerrainSSE > settings.terrainDetail) {
+        currentTerrainSSE = Math.max(settings.terrainDetail, currentTerrainSSE - 0.5);
+        viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+      }
+    }
+  }
+  document.getElementById('resScale').textContent =
+    `${Math.round(currentResolutionScale * 100)}% (${viewer.canvas.width}x${viewer.canvas.height})`;
+  document.getElementById('terrainSSE').textContent = currentTerrainSSE.toFixed(1);
+
+  // Heading (compass direction, 0=North matching our yaw convention) and
+  // pitch (look up/down angle), for "which way am I facing" awareness.
+  const headingDeg = ((Cesium.Math.toDegrees(yaw) % 360) + 360) % 360;
+  drawCompass(headingDeg);
+  drawAttitude(Cesium.Math.toDegrees(pitch));
+
+  updatePeakLabels();
+  updateSkyCompass(carto);
+  updateMinimap(carto, headingDeg);
+
+  requestAnimationFrame(tick);
+}
+
+// ---- Graphical compass: fixed N-up dial, needle rotates to heading ----
+const compassCtx = document.getElementById('compass').getContext('2d');
+function drawCompass(headingDeg) {
+  const ctx = compassCtx, w = 80, h = 80, r = 34, cx = w / 2, cy = h / 2;
+  ctx.clearRect(0, 0, w, h);
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 11px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const labels = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
+  for (const [label, deg] of labels) {
+    const a = Cesium.Math.toRadians(deg);
+    ctx.fillStyle = label === 'N' ? '#ff5252' : '#fff';
+    ctx.fillText(label, cx + Math.sin(a) * (r - 10), cy - Math.cos(a) * (r - 10));
+  }
+
+  // needle points toward current heading
+  const hr = Cesium.Math.toRadians(headingDeg);
+  ctx.strokeStyle = '#4fc3f7';
+  ctx.fillStyle = '#4fc3f7';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + Math.sin(hr) * (r - 16), cy - Math.cos(hr) * (r - 16));
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px sans-serif';
+  ctx.fillText(headingDeg.toFixed(0) + '°', cx, h - 6);
+}
+
+// ---- Graphical attitude indicator: classic aviation-style artificial
+// horizon (sky/ground split line tilts+shifts with pitch, fixed aircraft
+// marker in the center) ----
+const attitudeCtx = document.getElementById('attitude').getContext('2d');
+function drawAttitude(pitchDeg) {
+  const ctx = attitudeCtx, w = 80, h = 80, cx = w / 2, cy = h / 2, r = 34;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.clip();
+
+  // horizon line shifts vertically with pitch (roll is always 0 in this
+  // app, so it never tilts -- matches "up always points to the sky").
+  const pxPerDeg = 1.4;
+  const offset = pitchDeg * pxPerDeg;
+  ctx.fillStyle = '#6fa8dc'; // sky
+  ctx.fillRect(0, 0, w, cy + offset + h);
+  ctx.fillStyle = '#8a6a52'; // ground
+  ctx.fillRect(0, cy + offset, w, h);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(0, cy + offset); ctx.lineTo(w, cy + offset); ctx.stroke();
+  ctx.restore();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+
+  // fixed center marker (represents the nose/forward direction)
+  ctx.strokeStyle = '#ff5252';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - 12, cy); ctx.lineTo(cx - 4, cy);
+  ctx.moveTo(cx + 4, cy); ctx.lineTo(cx + 12, cy);
+  ctx.moveTo(cx, cy - 3); ctx.lineTo(cx, cy + 3);
+  ctx.stroke();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(pitchDeg.toFixed(0) + '°', cx, h - 6);
+}
+requestAnimationFrame(tick);
+
+// Persist tile cache across sessions: a service worker cache-first-fetches
+// OpenTopoMap/ArcGIS tiles into Cache Storage so a previously-flown-over
+// area loads instantly next time instead of re-downloading.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW registration failed', e));
+}
+
+// Without this the tile cache is only "best-effort": the browser is free to
+// evict the whole origin's storage whenever disk gets tight, which is why a
+// cache that looked fine last session can come back empty. persist() asks
+// for durable storage instead. Chrome grants it silently based on
+// engagement rather than prompting, so it may stay false for a while.
+async function updateCacheStatus() {
+  const el = document.getElementById('cacheStatus');
+  if (!el || !navigator.storage) return;
+  try {
+    const persisted = await navigator.storage.persisted();
+    const est = await navigator.storage.estimate();
+    const mb = (est.usage / 1048576).toFixed(0);
+    el.textContent = `${mb}MB ${persisted ? '(永続)' : '(一時)'}`;
+    el.style.color = persisted ? '#8f8' : '#fc8';
+  } catch (e) { /* storage API unavailable -- leave the placeholder */ }
+}
+if (navigator.storage && navigator.storage.persist) {
+  navigator.storage.persist().then(updateCacheStatus).catch(() => {});
+  setInterval(updateCacheStatus, 5000);
+}
+
+// ---- Minimap: real map tiles as background, with current position and
+// nearby mountains drawn on top each frame. Local-zoom, player-centered
+// view (NOT the whole of Japan squeezed into one small canvas -- that made
+// every dot too close together to read). Tiles for a 3x3 grid around the
+// player are fetched once and reused; a fresh grid is only fetched when the
+// player crosses into a different tile.
+function tileXFrac(lon, z) { return (lon + 180) / 360 * Math.pow(2, z); }
+function tileYFrac(lat, z) {
+  const r = lat * Math.PI / 180;
+  return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z);
+}
+
+const MINIMAP_GRID = 3;  // 3x3 tiles fetched around the player each recenter
+const minimapCanvas = document.getElementById('minimap');
+const minimapCtx = minimapCanvas.getContext('2d');
+let minimapBg = null;          // offscreen canvas, MINIMAP_GRID*256 square
+let minimapOriginTileX = null; // top-left tile of the currently-loaded grid
+let minimapOriginTileY = null;
+let minimapCenterTileX = null; // tile the grid is centered on -- recenter trigger
+let minimapCenterTileY = null;
+let minimapLoadedZoom = null;  // zoom the current grid was fetched at
+
+function ensureMinimapTiles(centerTileX, centerTileY, zoom) {
+  if (centerTileX === minimapCenterTileX && centerTileY === minimapCenterTileY
+      && zoom === minimapLoadedZoom) return;
+  minimapCenterTileX = centerTileX;
+  minimapCenterTileY = centerTileY;
+  minimapLoadedZoom = zoom;
+  const half = Math.floor(MINIMAP_GRID / 2);
+  minimapOriginTileX = centerTileX - half;
+  minimapOriginTileY = centerTileY - half;
+  const bg = document.createElement('canvas');
+  bg.width = bg.height = MINIMAP_GRID * 256;
+  const bgCtx = bg.getContext('2d');
+  for (let dx = 0; dx < MINIMAP_GRID; dx++) {
+    for (let dy = 0; dy < MINIMAP_GRID; dy++) {
+      const tx = minimapOriginTileX + dx, ty = minimapOriginTileY + dy;
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      // Assigned to minimapBg immediately below (not on load) -- tiles draw
+      // into it progressively as each finishes, so the map fills in instead
+      // of staying blank until every one of the 9 is done.
+      img.onload = () => bgCtx.drawImage(img, dx * 256, dy * 256);
+      // Plain OSM here rather than the OpenTopoMap used for the 3D globe:
+      // at minimap size the topo shading/contours turn into visual noise,
+      // while OSM's flat styling keeps roads, towns and coastline legible.
+      img.src = `https://tile.openstreetmap.org/${zoom}/${tx}/${ty}.png`;
+    }
+  }
+  minimapBg = bg;
+}
+
+function lonLatToMinimapPx(lon, lat, zoom) {
+  const x = (tileXFrac(lon, zoom) - minimapOriginTileX) * 256;
+  const y = (tileYFrac(lat, zoom) - minimapOriginTileY) * 256;
+  return [x, y];
+}
+
+// Minimap pins use the same combined list as the 3D labels.
+const MINIMAP_PINS = ALL_PEAKS;
+
+function drawMinimapPin(ctx, x, y) {
+  ctx.beginPath();
+  ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff'; // neutral -- not tied to climbed/not-climbed status
+  ctx.fill();
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = '#000';
+  ctx.stroke();
+}
+
+function updateMinimap(carto, headingDeg) {
+  const ctx = minimapCtx;
+  const w = minimapCanvas.width, h = minimapCanvas.height;
+  const lonDeg = Cesium.Math.toDegrees(carto.longitude);
+  const latDeg = Cesium.Math.toDegrees(carto.latitude);
+
+  const zoom = settings.minimapZoom;
+  const centerTileX = Math.floor(tileXFrac(lonDeg, zoom));
+  const centerTileY = Math.floor(tileYFrac(latDeg, zoom));
+  ensureMinimapTiles(centerTileX, centerTileY, zoom);
+
+  const [playerPxX, playerPxY] = lonLatToMinimapPx(lonDeg, latDeg, zoom);
+  const srcX = playerPxX - w / 2, srcY = playerPxY - h / 2;
+
+  ctx.clearRect(0, 0, w, h);
+  if (minimapBg) {
+    ctx.drawImage(minimapBg, srcX, srcY, w, h, 0, 0, w, h);
+  } else {
+    ctx.fillStyle = 'rgba(255,255,255,0.15)'; // placeholder while tiles load
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  // Mountain pins for whatever falls inside the visible area. Every visible
+  // peak gets a dot, but only the highest few get a text label -- at wide
+  // zooms dozens are in frame at once and labelling them all just produces
+  // an unreadable pile of overlapping text.
+  const visible = [];
+  for (const p of MINIMAP_PINS) {
+    const [px, py] = lonLatToMinimapPx(p.lon, p.lat, zoom);
+    const x = px - srcX, y = py - srcY;
+    if (x < -10 || x > w + 10 || y < -10 || y > h + 10) continue;
+    visible.push({ p, x, y });
+    drawMinimapPin(ctx, x, y);
+  }
+  visible.sort((a, b) => b.p.elev - a.p.elev);
+  // Dark text with a white halo, since OSM tiles are pale -- the previous
+  // white-on-shadow treatment was tuned for the dark topo tiles and washed
+  // out completely against roads and open ground.
+  ctx.font = 'bold 9px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.fillStyle = '#111';
+  for (const v of visible.slice(0, 8)) {
+    const t = `${v.p.name} ${v.p.elev}m`;
+    ctx.strokeText(t, v.x + 6, v.y - 4);
+    ctx.fillText(t, v.x + 6, v.y - 4);
+  }
+
+  // Current position + heading arrow, always centered (map pans, not the
+  // marker). Drawn twice: a thicker black pass underneath, then the blue on
+  // top, so the marker stays readable over pale OSM tiles as well as dark
+  // forest green.
+  const cx = w / 2, cy = h / 2;
+  const headRad = Cesium.Math.toRadians(headingDeg);
+  const tipX = cx + Math.sin(headRad) * 12, tipY = cy - Math.cos(headRad) * 12;
+
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 4.5;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(tipX, tipY);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.strokeStyle = '#4fc3f7';
+  ctx.fillStyle = '#4fc3f7';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(tipX, tipY);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineCap = 'butt';
+}
+</script>
+</body>
+</html>

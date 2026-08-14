@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>SpaceMouse WebHID Test</title>
+<style>
+  body { font-family: sans-serif; background:#111; color:#eee; padding: 2rem; }
+  button { font-size: 1.2rem; padding: 0.6rem 1.2rem; cursor: pointer; }
+  #status { margin-top: 1rem; font-size: 1.1rem; }
+  #values { margin-top: 1rem; font-family: monospace; font-size: 1.1rem; white-space: pre; }
+  .ok { color: #6f6; }
+  .bad { color: #f66; }
+  #reportCount { font-size: 2rem; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<h1>SpaceMouse WebHID 動作確認</h1>
+<button id="connectBtn">SpaceMouseに接続</button>
+<div id="status">未接続</div>
+<div id="reportCount">受信レポート数: 0</div>
+<div id="values">x=0 y=0 z=0 rx=0 ry=0 rz=0</div>
+
+<script>
+const statusEl = document.getElementById('status');
+const valuesEl = document.getElementById('values');
+const countEl = document.getElementById('reportCount');
+let reportCount = 0;
+let state = {x:0,y:0,z:0,rx:0,ry:0,rz:0};
+
+function log(msg) {
+  console.log('[webhid-test]', msg);
+}
+
+function updateDisplay() {
+  valuesEl.textContent =
+    `x=${state.x} y=${state.y} z=${state.z} rx=${state.rx} ry=${state.ry} rz=${state.rz}`;
+  countEl.textContent = `受信レポート数: ${reportCount}`;
+}
+
+function parseReport(reportId, data) {
+  // Standard SpaceNavigator report layout (reverse-engineered earlier this
+  // session): reportId 1 = translation x,y,z (int16 LE each), reportId 2 =
+  // rotation rx,ry,rz (int16 LE each), reportId 3 = buttons.
+  function i16(off) {
+    let v = data.getInt16(off, true);
+    return v;
+  }
+  if (reportId === 1 && data.byteLength >= 6) {
+    state.x = i16(0); state.y = i16(2); state.z = i16(4);
+  } else if (reportId === 2 && data.byteLength >= 6) {
+    state.rx = i16(0); state.ry = i16(2); state.rz = i16(4);
+  }
+  reportCount++;
+  updateDisplay();
+}
+
+document.getElementById('connectBtn').addEventListener('click', async () => {
+  if (!('hid' in navigator)) {
+    statusEl.textContent = 'このブラウザはWebHIDに対応していません（Chrome推奨）';
+    statusEl.className = 'bad';
+    log('WebHID not supported');
+    return;
+  }
+  try {
+    log('requesting device...');
+    // 3Dconnexion vendor ID 0x046d (Logitech legacy) covers SpaceNavigator
+    const devices = await navigator.hid.requestDevice({
+      filters: [{ vendorId: 0x046d }]
+    });
+    if (devices.length === 0) {
+      statusEl.textContent = 'デバイスが選択されませんでした';
+      statusEl.className = 'bad';
+      log('no device selected');
+      return;
+    }
+    const device = devices[0];
+    log('selected device: ' + device.productName + ' vid=' + device.vendorId.toString(16) + ' pid=' + device.productId.toString(16));
+    await device.open();
+    log('device opened');
+    statusEl.textContent = `接続済み: ${device.productName}`;
+    statusEl.className = 'ok';
+
+    device.addEventListener('inputreport', (event) => {
+      parseReport(event.reportId, event.data);
+    });
+  } catch (e) {
+    statusEl.textContent = 'エラー: ' + e.message;
+    statusEl.className = 'bad';
+    log('ERROR: ' + e.message);
+  }
+});
+</script>
+</body>
+</html>
