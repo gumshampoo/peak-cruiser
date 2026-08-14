@@ -14,7 +14,12 @@
     font-family: sans-serif; color: #fff; background: rgba(0,0,0,0.5);
     padding: 10px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5;
   }
-  #hudText { min-width: 232px; }
+  /* Fixed width + tabular figures: without both, the panel breathed in and
+     out as the coordinate readouts changed digits, which is very visible at
+     the corner of the eye while flying. */
+  #hudText { width: 250px; }
+  #hud, #hudText { font-variant-numeric: tabular-nums; }
+  #rawvals { display: block; white-space: nowrap; overflow: hidden; }
   #connectBtn { font-size: 1rem; padding: 0.4rem 1rem; cursor: pointer; margin-bottom: 6px; }
   .ok { color: #6f6; } .bad { color: #f66; }
 
@@ -38,6 +43,10 @@
      was tried and dropped: the two directions crossed over each other, and
      running off the side edge is harmless anyway. */
   .peak-label .name { font-size: 13px; font-weight: bold; }
+  /* The 100 famous mountains are what the eye is usually hunting for, so they
+     get size and colour on top of the star; the 300-list gets dimmed back. */
+  .peak-label.r100 .name { font-size: 15px; color: #ffe082; }
+  .peak-label.r300 .name { font-size: 12px; opacity: 0.85; }
   .peak-label .dist { font-size: 10px; opacity: 0.85; margin-left: 4px; }
   .peak-label .line {
     position: absolute; left: 0; bottom: 0; width: 1px;
@@ -63,19 +72,29 @@
   #settingsPanel .row { margin-bottom: 12px; }
   #settingsPanel label { display: flex; justify-content: space-between; margin-bottom: 3px; }
   #settingsPanel input[type=range] { width: 100%; }
+  /* Texture stack: checkbox to include a layer, slider for how strongly it
+     shows through the ones beneath it. */
+  .imgrow { margin: 4px 0 6px; }
+  .imgrow label {
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    justify-content: flex-start; margin-bottom: 2px;
+  }
+  .imgrow input[type=checkbox] { width: auto; }
+  .imgrow input[type=range] { width: 100%; }
+  .imgrow.off { opacity: 0.45; }
   #settingsPanel button.reset {
     width: 100%; padding: 5px; cursor: pointer; margin-top: 4px;
   }
 
-  /* Compass bearings drawn on the horizon, PeakFinder-style. Amber rather
-     than white so they read as a separate layer from the peak names. */
+  /* Compass bearings drawn on the horizon. Blue rather than white so they
+     read as a separate layer from the peak names. */
   /* Anchored by its BOTTOM edge, so the marker stacks upward from the
      horizon point: the lower tick just touches the skyline and the text sits
      clear of the terrain, against the sky where it stays readable. */
   .sky-dir {
     position: absolute; transform: translate(-50%, -100%);
     display: flex; flex-direction: column; align-items: center;
-    font-family: sans-serif; color: #ffd54f; text-align: center;
+    font-family: sans-serif; color: #6cc6ff; text-align: center;
     text-shadow: 0 0 4px #000, 0 0 3px #000; white-space: nowrap;
   }
   /* Three weights so the eye can find N/E/S/W instantly and read the rest
@@ -88,7 +107,7 @@
      from the sky to the point on the horizon it marks. Fading the stem out
      toward the bottom keeps it from competing with the terrain silhouette
      and the peak leader lines it crosses. */
-  .sky-dir .tick { width: 1px; background: rgba(255,213,79,0.85); }
+  .sky-dir .tick { width: 1px; background: rgba(108,198,255,0.9); }
   .sky-dir.cardinal .tick { height: 14px; }
   .sky-dir.inter .tick { height: 10px; }
   .sky-dir.minor .tick { height: 6px; opacity: 0.6; }
@@ -96,7 +115,7 @@
   .sky-dir .stem {
     width: 1px; flex: 1; margin-top: 3px; min-height: 0;
     background: linear-gradient(to bottom,
-      rgba(255,213,79,0.8) 0%, rgba(255,213,79,0.45) 55%, rgba(255,213,79,0.12) 100%);
+      rgba(108,198,255,0.85) 0%, rgba(108,198,255,0.45) 55%, rgba(108,198,255,0.12) 100%);
   }
   .sky-dir.minor .stem { opacity: 0.55; }
 
@@ -117,7 +136,41 @@
   #nearbyPanel td.km { text-align: right; color: #ddd; }
   #nearbyPanel td.el { text-align: right; color: #aaa; }
   #nearbyPanel tr.r100 td.nm { color: #ffd54f; }
+  #nearbyPanel td.bdg { width: 1.2em; text-align: center; color: #ffd54f; }
+  #nearbyPanel tr.r300 td.bdg { color: #888; }
   #nearbyPanel .vis { color: #8f8; }
+  #nearbyPanel .legend {
+    font-size: 11px; opacity: 0.8; line-height: 1.6;
+    padding-bottom: 6px; margin-bottom: 6px;
+    border-bottom: 1px solid rgba(255,255,255,0.2);
+  }
+
+  /* Startup gate: flying into a half-loaded world is disorienting, so hold
+     the view until enough terrain and imagery has arrived to look like
+     somewhere. Always skippable -- on a slow link the wait could be long. */
+  #loading {
+    position: absolute; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    background: #8fc6ea; font-family: sans-serif; color: #fff;
+    transition: opacity 0.5s ease; text-align: center;
+  }
+  #loading.done { opacity: 0; pointer-events: none; }
+  #loading .box { background: rgba(0,0,0,0.45); padding: 28px 36px; border-radius: 10px; }
+  #loading .ttl { font-size: 22px; font-weight: bold; margin-bottom: 10px; }
+  #loading .msg { font-size: 13px; opacity: 0.9; margin-bottom: 14px; }
+  #loading .bar {
+    width: 260px; height: 6px; border-radius: 3px;
+    background: rgba(255,255,255,0.25); overflow: hidden;
+  }
+  #loading .fill {
+    height: 100%; width: 0%; background: #fff;
+    transition: width 0.3s ease;
+  }
+  #loading button {
+    margin-top: 14px; font-size: 12px; padding: 5px 14px; cursor: pointer;
+    background: rgba(255,255,255,0.15); color: #fff;
+    border: 1px solid rgba(255,255,255,0.5); border-radius: 4px;
+  }
 
   #minimap {
     position: absolute; bottom: 10px; right: 10px; z-index: 10; display: block;
@@ -128,6 +181,14 @@
 </head>
 <body>
 <div id="cesiumContainer"></div>
+<div id="loading">
+  <div class="box">
+    <div class="ttl">🏔 Peak Cruiser</div>
+    <div class="msg" id="loadingMsg">地形を読み込んでいます…</div>
+    <div class="bar"><div class="fill" id="loadingBar"></div></div>
+    <button id="loadingSkip">待たずに開始</button>
+  </div>
+</div>
 <div id="peakLabels" style="position:absolute; inset:0; z-index:5; pointer-events:none; overflow:hidden;"></div>
 <div id="skyCompass" style="position:absolute; inset:0; z-index:4; pointer-events:none; overflow:hidden;"></div>
 <button id="nearbyBtn">📋 近くの山</button>
@@ -217,8 +278,8 @@
     </label>
   </div>
   <div class="row">
-    <label><span>地表テクスチャ</span></label>
-    <select id="s_imagery" style="width:100%; padding:4px;"></select>
+    <label><span>地表テクスチャ（重ねられます）</span></label>
+    <div id="imageryList"></div>
   </div>
   <div class="row">
     <label><span>遠景のかすみ</span><span id="v_fogDensity"></span></label>
@@ -227,12 +288,6 @@
   <div class="row">
     <label><span>時刻 (JST)</span><span id="v_timeOfDay"></span></label>
     <input type="range" id="s_timeOfDay" min="0" max="24" step="0.25">
-  </div>
-  <div class="row">
-    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
-      <input type="checkbox" id="c_occlusion" style="width:auto;">
-      <span>地形に隠れた山を消す(重い)</span>
-    </label>
   </div>
   <button class="reset" id="resetBtn">初期値に戻す</button>
 </div>
@@ -278,38 +333,45 @@ viewer.scene.verticalExaggeration = 1.0; // real scale preferred over the dramat
 // clipped to Japan anyway.
 const GSI = 'https://cyberjapandata.gsi.go.jp/xyz';
 const GSI_CREDIT = '国土地理院';
-const IMAGERY_OPTIONS = [
-  { id: 'opentopo', label: '地形図 (OpenTopoMap)', layers: [
-    { url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
-      subdomains: ['a','b','c'], credit: '© OpenTopoMap (CC-BY-SA)', maximumLevel: 16 } ] },
-  // minimumLevel matters as much as maximumLevel here: each GSI layer only
-  // exists over a specific zoom range, and without a floor Cesium happily
-  // asks for z0-4 and collects a pile of 404s on every load.
-  { id: 'relief', label: '色別標高図 (グラデーション)', layers: [
-    { url: `${GSI}/relief/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 5, maximumLevel: 15 } ] },
-  // Elevation colour carries the "how high is it", the hillshade on top
-  // carries the "what shape is it". Two cheap raster layers give the look
-  // the GPU-side material was reaching for, without the material.
-  { id: 'relief_shade', label: '色別標高図＋陰影 (おすすめ)', layers: [
-    { url: `${GSI}/relief/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 5, maximumLevel: 15 },
-    { url: `${GSI}/hillshademap/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 16, alpha: 0.55 } ] },
-  { id: 'photo', label: '航空写真', layers: [
-    { url: `${GSI}/seamlessphoto/{z}/{x}/{y}.jpg`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
-  { id: 'pale', label: '淡色地図', layers: [
-    { url: `${GSI}/pale/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
-  { id: 'shade', label: '陰影起伏図のみ (白黒)', layers: [
-    { url: `${GSI}/hillshademap/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 16 } ] },
-  { id: 'std', label: '標準地図', layers: [
-    { url: `${GSI}/std/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
+
+// One entry per layer, freely combinable. Order here is bottom-to-top on the
+// globe, so a base map sits under the shading and colour washes that
+// modulate it. Each carries a default opacity suited to being stacked.
+const IMAGERY_LAYERS = [
+  { id: 'opentopo', label: '地形図 (OpenTopoMap)', alpha: 1,
+    spec: { url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+            subdomains: ['a','b','c'], credit: '© OpenTopoMap (CC-BY-SA)', maximumLevel: 16 } },
+  { id: 'std', label: '標準地図', alpha: 1,
+    spec: { url: `${GSI}/std/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } },
+  { id: 'pale', label: '淡色地図', alpha: 1,
+    spec: { url: `${GSI}/pale/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } },
+  { id: 'photo', label: '航空写真', alpha: 1,
+    spec: { url: `${GSI}/seamlessphoto/{z}/{x}/{y}.jpg`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } },
+  // minimumLevel matters as much as maximumLevel: each GSI layer only exists
+  // over a specific zoom range, and without a floor Cesium happily asks for
+  // z0-4 and collects a pile of 404s on every load.
+  { id: 'relief', label: '色別標高図 (グラデーション)', alpha: 0.75,
+    spec: { url: `${GSI}/relief/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 5, maximumLevel: 15 } },
+  { id: 'shade', label: '陰影起伏図', alpha: 0.55,
+    spec: { url: `${GSI}/hillshademap/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 16 } },
 ];
 
 function applyImagery() {
-  const opt = IMAGERY_OPTIONS.find(o => o.id === settings.imagery) || IMAGERY_OPTIONS[0];
   viewer.imageryLayers.removeAll();
-  for (const spec of opt.layers) {
+  let added = 0;
+  for (const def of IMAGERY_LAYERS) {
+    const conf = settings.imagery[def.id];
+    if (!conf || !conf.on) continue;
     const layer = viewer.imageryLayers.addImageryProvider(
-      new Cesium.UrlTemplateImageryProvider(spec));
-    if (spec.alpha !== undefined) layer.alpha = spec.alpha;
+      new Cesium.UrlTemplateImageryProvider(def.spec));
+    layer.alpha = conf.alpha;
+    added++;
+  }
+  // Every layer switched off would leave the bare globe colour showing, which
+  // reads as a bug rather than a choice -- fall back to the base map.
+  if (added === 0) {
+    const def = IMAGERY_LAYERS[0];
+    viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider(def.spec));
   }
   viewer.scene.requestRender();
 }
@@ -746,7 +808,6 @@ const peakEntries = ALL_PEAKS.map(p => ({
   ...p,
   pos: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.elev),
   el: null,        // lazily-created DOM element
-  occluded: false, // set by the terrain line-of-sight pass below
 }));
 
 const EARTH_R = 6371000;
@@ -871,19 +932,22 @@ function updateSkyCompass(carto) {
     Cesium.Cartesian3.normalize(to, to);
     if (Cesium.Cartesian3.dot(to, forward) <= 0) { d.el.style.display = 'none'; continue; }
     const win = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, pos);
-    if (!win || win.x < 0 || win.x > cw || win.y < -40 || win.y > ch) {
-      d.el.style.display = 'none';
-      continue;
-    }
+    if (!win || win.x < 0 || win.x > cw) { d.el.style.display = 'none'; continue; }
+
+    // Pitch down far enough and the horizon leaves the top of the frame.
+    // Rejecting the marker there meant losing all sense of direction exactly
+    // when looking straight at the ground -- which is most of the time in
+    // this app. Clamp the anchor into view instead: the bearing stays
+    // readable, it just stops claiming to sit on a horizon you can't see.
+    const anchorY = Cesium.Math.clamp(win.y, SKY_DIR_TOP + SKY_DIR_MIN_H, ch);
 
     d.el.style.display = '';
     d.el.style.left = win.x + 'px';
-    d.el.style.top = win.y + 'px';
-    // Bottom-anchored on the horizon point, tall enough to lift the label
-    // up near the top of the frame -- so the name reads against open sky and
-    // the stem shows exactly which point on the skyline it refers to. Guard
-    // a minimum for when the horizon itself is already high in the view.
-    d.el.style.height = Math.max(SKY_DIR_MIN_H, win.y - SKY_DIR_TOP) + 'px';
+    d.el.style.top = anchorY + 'px';
+    // Bottom-anchored on that point, tall enough to lift the label up near
+    // the top of the frame, so the name reads against open sky and the stem
+    // shows which direction it refers to.
+    d.el.style.height = Math.max(SKY_DIR_MIN_H, anchorY - SKY_DIR_TOP) + 'px';
   }
 }
 
@@ -900,6 +964,11 @@ function bearingDeg(lat1, lon1, lat2, lon2) {
   const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
   return (Cesium.Math.toDegrees(Math.atan2(y, x)) + 360) % 360;
 }
+
+// One glyph per list, used both in the nearby panel and on the 3D labels, so
+// "is this one of the famous hundred?" is answerable at a glance instead of
+// having to remember what a colour meant.
+const RANK_BADGE = { 100: '★', 200: '☆', 300: '·' };
 
 const nearbyPanel = document.getElementById('nearbyPanel');
 const nearbyListEl = document.getElementById('nearbyList');
@@ -919,13 +988,16 @@ function updateNearbyList() {
     p, d: Cesium.Cartesian3.distance(p.pos, camPos),
   })).sort((a, b) => a.d - b.d).slice(0, 25);
 
-  const html = ['<table>'];
+  const html = ['<div class="legend">' +
+    `${RANK_BADGE[100]}百名山 ${RANK_BADGE[200]}二百名山 ${RANK_BADGE[300]}三百名山` +
+    ' &nbsp;<span class="vis">●</span>いま見えている</div>', '<table>'];
   for (const { p, d } of rows) {
     const b = bearingDeg(latDeg, lonDeg, p.lat, p.lon);
     const dir = COMPASS_16[Math.round(b / 22.5) % 16];
-    const visible = !p.occluded && p.el && p.el.style.display !== 'none';
+    const visible = p.el && p.el.style.display !== 'none';
     html.push(
       `<tr class="r${p.rank}">` +
+      `<td class="bdg">${RANK_BADGE[p.rank]}</td>` +
       `<td class="dir">${dir}</td>` +
       `<td class="nm">${p.name}${visible ? ' <span class="vis">●</span>' : ''}</td>` +
       `<td class="km">${(d / 1000).toFixed(1)}km</td>` +
@@ -936,78 +1008,13 @@ function updateNearbyList() {
 }
 setInterval(updateNearbyList, 700);
 
-// ---- Terrain occlusion: hide labels for peaks hidden behind nearer ridges.
-// The horizon test above only accounts for the earth's curvature; a 2000m
-// peak can still be completely blocked by a closer 2500m ridge. globe.pick
-// casts a ray at the summit and reports where terrain actually stops it.
-//
-// This is far too expensive to run per-frame for ~100 peaks, so it lives on
-// its own interval outside the render loop (same reasoning as the ground-
-// height sampling above) and tick() only ever reads the cached flag.
-// globe.pick traverses loaded terrain geometry and is genuinely expensive --
-// running it over every peak at once froze the whole app, because being
-// outside requestAnimationFrame doesn't help when JS is single-threaded and
-// the pass still hogs the main thread for tens of milliseconds. So the work
-// is amortised: each invocation raycasts at most OCCLUSION_BUDGET peaks and
-// resumes where it left off, sweeping the full list over a couple of
-// seconds. Labels lagging reality by a second or two is unnoticeable;
-// dropped frames are not.
-const OCCLUSION_INTERVAL = 200;
-const OCCLUSION_BUDGET = 3;
-let occlusionCursor = 0;
-
-setInterval(() => {
-  const globe = viewer.scene.globe;
-  if (!globe || !settings.occlusionTest) return;
-  const camPos = viewer.camera.positionWC;
-  const camCarto = Cesium.Cartographic.fromCartesian(camPos);
-  const camHorizon = horizonDistance(Math.max(0, camCarto.height));
-  const forward = viewer.camera.directionWC;
-  const cw = viewer.canvas.clientWidth, ch = viewer.canvas.clientHeight;
-
-  let budget = OCCLUSION_BUDGET;
-  // Walk the list from wherever the last invocation stopped, spending the
-  // budget only on peaks that actually need a raycast.
-  for (let n = 0; n < peakEntries.length && budget > 0; n++) {
-    const peak = peakEntries[occlusionCursor];
-    occlusionCursor = (occlusionCursor + 1) % peakEntries.length;
-    // `occluded` means one thing only: terrain is known to block the line of
-    // sight. Every other reason to skip the raycast below (off screen,
-    // behind the camera, past the horizon) is re-tested per-frame in
-    // updatePeakLabels, so those cases clear the flag rather than setting
-    // it -- conflating the two made every label vanish whenever the canvas
-    // reported a zero size.
-    const toPeak = Cesium.Cartesian3.subtract(peak.pos, camPos, new Cesium.Cartesian3());
-    const distance = Cesium.Cartesian3.magnitude(toPeak);
-    if (distance > camHorizon + horizonDistance(peak.elev)) { peak.occluded = false; continue; }
-    const dir = Cesium.Cartesian3.normalize(toPeak, new Cesium.Cartesian3());
-    if (Cesium.Cartesian3.dot(dir, forward) <= 0) { peak.occluded = false; continue; }
-    if (cw > 0 && ch > 0) {
-      const win = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, peak.pos);
-      if (!win || win.x < 0 || win.x > cw || win.y < 0 || win.y > ch) { peak.occluded = false; continue; }
-    }
-
-    budget--; // only the raycast itself is worth rationing
-    const hit = globe.pick(new Cesium.Ray(camPos, dir), viewer.scene);
-    if (!hit) {
-      // No intersection reported usually means terrain there isn't loaded
-      // yet -- err toward showing the label rather than flickering it off.
-      peak.occluded = false;
-      continue;
-    }
-    // The summit is itself made of terrain, so the ray always lands at
-    // roughly the peak's own distance. Only count it as blocked when
-    // something stops the ray meaningfully short of that, with the
-    // tolerance scaling by range since far tiles are coarser.
-    const hitDist = Cesium.Cartesian3.distance(camPos, hit);
-    const nowOccluded = hitDist < distance - Math.max(300, distance * 0.02);
-    // This runs on its own timer, so a change here has to tell the render
-    // loop to redraw the overlays -- otherwise a label could appear or
-    // vanish while the camera is parked and nothing would repaint.
-    if (nowOccluded !== peak.occluded) overlayDirty = true;
-    peak.occluded = nowOccluded;
-  }
-}, OCCLUSION_INTERVAL);
+// NOTE: terrain-occlusion culling was removed in v0.3.0.
+// Ray-casting every peak against the terrain mesh to hide the ones behind a
+// ridge was by far the most expensive thing in the app, and the payoff was
+// small: peaks hidden behind a ridge are usually distant ones that the
+// distance fade already plays down. The horizon test below still removes
+// anything genuinely over the earth's curve, which is the case that actually
+// looked wrong.
 
 // Cosine of the half-angle of a cone that contains the whole frustum, with a
 // margin so a label whose anchor is just off-screen (but whose slanted text
@@ -1027,19 +1034,24 @@ function updateViewCone() {
 updateViewCone();
 window.addEventListener('resize', updateViewCone);
 
+// Above this the view is essentially "Japan from space": every peak is a
+// dot, the labels are meaningless clutter, and drawing them is pure cost.
+const LABEL_MAX_CAMERA_HEIGHT = 500000;
+
 function updatePeakLabels() {
   const canvas = viewer.canvas;
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
   const camPos = viewer.camera.positionWC;
   const camCarto = Cesium.Cartographic.fromCartesian(camPos);
+  if (camCarto.height > LABEL_MAX_CAMERA_HEIGHT) {
+    for (const peak of peakEntries) if (peak.el) peak.el.style.display = 'none';
+    return;
+  }
   const camHorizon = horizonDistance(Math.max(0, camCarto.height));
   const forward = viewer.camera.directionWC;
 
   const candidates = [];
   for (const peak of peakEntries) {
-    // Blocked by terrain (computed on its own interval, see above).
-    if (peak.occluded) continue;
-
     const toPeak = Cesium.Cartesian3.subtract(peak.pos, camPos, new Cesium.Cartesian3());
     const distance = Cesium.Cartesian3.magnitude(toPeak);
 
@@ -1114,7 +1126,7 @@ function updatePeakLabels() {
   for (const { peak, win, distance } of shown) {
     if (!peak.el) {
       const el = document.createElement('div');
-      el.className = 'peak-label';
+      el.className = `peak-label r${peak.rank}`;
       el.innerHTML = `<span class="rot"><span class="name"></span><span class="dist"></span></span>`
         + `<span class="line"></span><span class="dot"></span>`;
       peakLabelsEl.appendChild(el);
@@ -1136,7 +1148,7 @@ function updatePeakLabels() {
     peak.el.style.top = win.y + 'px';
     // The name never changes for a given peak -- only write it once.
     if (peak.lastName !== peak.name) {
-      peak.elName.textContent = peak.name;
+      peak.elName.textContent = `${RANK_BADGE[peak.rank] || ''}${peak.name}`;
       peak.lastName = peak.name;
     }
     peak.elDist.textContent = `${(distance / 1000).toFixed(1)} km / ${peak.elev} m`;
@@ -1191,10 +1203,17 @@ const DEFAULTS = {
                              // very low, so holding 30fps is always possible
   minimapZoom: 8,            // web-mercator zoom level of the minimap
   terrainDetail: 1.0,        // best terrain screen-space error (smaller = finer)
-  occlusionTest: true,       // hide labels for peaks blocked by terrain
   labelFarOpacity: 0.3,      // opacity of the most distant labels (0 = fade out)
   japanOnly: true,           // don't render globe outside Japan at all
-  imagery: 'opentopo',       // surface texture, see IMAGERY_OPTIONS
+  // Per-layer {on, alpha}; layers stack bottom-to-top in IMAGERY_LAYERS order.
+  imagery: {
+    opentopo: { on: true,  alpha: 1 },
+    std:      { on: false, alpha: 1 },
+    pale:     { on: false, alpha: 1 },
+    photo:    { on: false, alpha: 1 },
+    relief:   { on: false, alpha: 0.75 },
+    shade:    { on: false, alpha: 0.55 },
+  },
   fogDensity: 0.5,           // multiplier on Cesium's default haze; 0 = off
   sunLighting: false,        // shade terrain by real sun position
   timeOfDay: 10,             // hours, JST, used when sunLighting is on
@@ -1267,11 +1286,9 @@ function refreshSettingsUI() {
     document.getElementById(d.slider).value = settings[d.key];
     document.getElementById(d.value).textContent = d.fmt(settings[d.key]);
   }
-  document.getElementById('c_occlusion').checked = settings.occlusionTest;
   document.getElementById('c_japanOnly').checked = settings.japanOnly;
   document.getElementById('c_sunLighting').checked = settings.sunLighting;
   document.getElementById('c_pauseWhenUnfocused').checked = settings.pauseWhenUnfocused;
-  document.getElementById('s_imagery').value = settings.imagery;
 }
 // Yes: rendering the rest of the world does cost. Looking at the horizon
 // throws a frustum thousands of km deep, and Cesium dutifully streams coarse
@@ -1365,9 +1382,35 @@ applyTileLimit();
 // render loop outright (rather than just lowering the frame rate) drops the
 // cost to nothing while the app sits in the background.
 let windowFocused = true;
+let idleStopTimer = null;
+
+// Is there still work in flight worth finishing? Cutting the render loop the
+// instant focus is lost would freeze a half-loaded view mid-download, so the
+// tiles already paid for never get drawn and the next visit starts from the
+// same unfinished picture. Keep running until the scene has actually settled,
+// then stop.
+function sceneHasPendingWork() {
+  return !viewer.scene.globe.tilesLoaded ||
+         Cesium.RequestScheduler.statistics.numberOfActiveRequests > 0;
+}
+
 function applyFocusState() {
-  const active = windowFocused || !settings.pauseWhenUnfocused;
-  if (viewer.useDefaultRenderLoop !== active) viewer.useDefaultRenderLoop = active;
+  if (idleStopTimer !== null) { clearInterval(idleStopTimer); idleStopTimer = null; }
+
+  if (windowFocused || !settings.pauseWhenUnfocused) {
+    if (!viewer.useDefaultRenderLoop) viewer.useDefaultRenderLoop = true;
+    return;
+  }
+  // Unfocused: keep rendering only until the outstanding loading and drawing
+  // has finished, then go quiet. Checked on a slow timer -- it costs nothing
+  // and the exact moment we stop doesn't matter.
+  const stopWhenDone = () => {
+    if (sceneHasPendingWork()) return;
+    clearInterval(idleStopTimer); idleStopTimer = null;
+    if (viewer.useDefaultRenderLoop) viewer.useDefaultRenderLoop = false;
+  };
+  if (!sceneHasPendingWork()) { stopWhenDone(); return; }
+  idleStopTimer = setInterval(stopWhenDone, 400);
 }
 window.addEventListener('blur', () => { windowFocused = false; applyFocusState(); });
 window.addEventListener('focus', () => {
@@ -1383,30 +1426,32 @@ document.addEventListener('visibilitychange', () => {
   applyFocusState();
 });
 
-const imagerySelect = document.getElementById('s_imagery');
-for (const o of IMAGERY_OPTIONS) {
-  imagerySelect.appendChild(Object.assign(document.createElement('option'),
-    { value: o.id, textContent: o.label }));
+// Build one row per layer: a checkbox to include it and a slider for how
+// strongly it shows through whatever is beneath.
+const imageryListEl = document.getElementById('imageryList');
+for (const def of IMAGERY_LAYERS) {
+  const conf = settings.imagery[def.id] || (settings.imagery[def.id] = { on: false, alpha: def.alpha });
+  const row = document.createElement('div');
+  row.className = 'imgrow';
+  row.innerHTML =
+    `<label><input type="checkbox" ${conf.on ? 'checked' : ''}><span>${def.label}</span></label>` +
+    `<input type="range" min="0.1" max="1" step="0.05" value="${conf.alpha}">`;
+  const [cb, sl] = [row.querySelector('input[type=checkbox]'), row.querySelector('input[type=range]')];
+  const sync = () => { row.classList.toggle('off', !conf.on); sl.disabled = !conf.on; };
+  cb.addEventListener('change', () => {
+    conf.on = cb.checked; saveSettings(); sync(); applyImagery();
+  });
+  sl.addEventListener('input', () => {
+    conf.alpha = parseFloat(sl.value); saveSettings(); applyImagery();
+  });
+  sync();
+  imageryListEl.appendChild(row);
 }
-imagerySelect.value = settings.imagery;
-imagerySelect.addEventListener('change', (e) => {
-  settings.imagery = e.target.value;
-  saveSettings();
-  applyImagery();
-});
 applyImagery();
 document.getElementById('c_japanOnly').addEventListener('change', (e) => {
   settings.japanOnly = e.target.checked;
   saveSettings();
   applyJapanOnly();
-});
-document.getElementById('c_occlusion').addEventListener('change', (e) => {
-  settings.occlusionTest = e.target.checked;
-  saveSettings();
-  // Turning it off must clear any stale flags, or peaks hidden at the moment
-  // it was switched off would stay hidden forever.
-  if (!settings.occlusionTest) for (const p of peakEntries) p.occluded = false;
-  overlayDirty = true;
 });
 for (const d of SLIDER_DEFS) {
   document.getElementById(d.slider).addEventListener('input', (e) => {
@@ -1514,8 +1559,11 @@ let lastTime = performance.now();
 let fpsSmoothed = 60;
 let lastResScaleCheck = performance.now();
 let slowFrameStreak = 0;
-const FPS_TARGET = 30;   // below this, start giving up quality
-const FPS_RECOVER = 36;  // above this, start claiming it back
+// The framerate we defend, derived from whatever cap is in force. Defending
+// the cap itself is incoherent -- frames land exactly there, jitter dips
+// under, and the controller ends up treating its own pacing as overload.
+function fpsFloor() { return settings.fpsCap > 0 ? settings.fpsCap * 0.8 : 30; }
+function fpsGood()  { return settings.fpsCap > 0 ? settings.fpsCap * 0.95 : 40; }
 let qualitySettle = 0;   // frames to ignore after a resolution change
 let idleMs = 0;          // how long the camera has been sitting still
 // Last camera state the HUD overlays were drawn for, so they can be skipped
@@ -1699,18 +1747,18 @@ function tick() {
     // side of them, which is exactly when we most want to have cut back.
     fpsSmoothed += (instFps - fpsSmoothed) * (instFps < fpsSmoothed ? 0.4 : 0.05);
 
-    // Fast path: 30 fps is treated as a floor to defend, not a target to
-    // drift around, so any frame that misses it starts cutting immediately
-    // rather than waiting for the half-second controller. The step scales
-    // with how badly the frame missed, so a severe stall collapses the
-    // resolution in a couple of frames instead of easing down over seconds.
-    // Disabled while parked, where slow frames buy detail nobody is fighting.
-    if (!parked && instFps < FPS_TARGET && currentResolutionScale > settings.minResolutionScale) {
+    // Emergency path only. This used to fire on any frame under the target,
+    // which was self-defeating once a frame-rate cap existed: a capped 30fps
+    // lands frames AT 30, jitter puts many of them just under, and the
+    // controller read its own cap as the scene being too heavy and collapsed
+    // the resolution to minimum within a second. It now waits for frames
+    // that are genuinely crawling, and even then steps gently -- the
+    // half-second controller below does the ordinary work.
+    if (!parked && instFps < 12 && currentResolutionScale > settings.minResolutionScale) {
       slowFrameStreak++;
-      if (slowFrameStreak >= 2) {
+      if (slowFrameStreak >= 3) {
         slowFrameStreak = 0;
-        const miss = Cesium.Math.clamp((FPS_TARGET - instFps) / FPS_TARGET, 0, 1);
-        setResolutionScale(currentResolutionScale - (0.05 + 0.25 * miss));
+        setResolutionScale(currentResolutionScale - 0.08);
       }
     } else {
       slowFrameStreak = 0;
@@ -1719,21 +1767,20 @@ function tick() {
   document.getElementById('fps').textContent = fpsSmoothed.toFixed(0);
   document.getElementById('pendingTiles').textContent = Cesium.RequestScheduler.statistics.numberOfActiveRequests;
 
-  // Twice a second, trade quality for framerate or claim it back. Cut hard
-  // and fast when short (both dials at once -- holding the framerate beats
-  // either, and the loss is temporary); restore gently, resolution first,
-  // then terrain detail.
+  // Twice a second, trade quality for framerate or claim it back.
   //
-  // The two thresholds are deliberately close together. An earlier version
-  // cut below 30 but only restored above 45, which left a dead band: a scene
-  // sitting at any steady 30-45 fps satisfied neither branch and simply
-  // stayed at whatever reduced quality it had fallen to, forever.
+  // Two rules matter here. First, the framerate we defend has to sit BELOW
+  // any cap we've imposed on ourselves -- defending the cap itself means
+  // fighting our own frame pacing forever. Second, terrain detail is spent
+  // before resolution: coarser ground is far less noticeable than a soft
+  // picture, so resolution is only touched once terrain has nothing left to
+  // give, or when the shortfall is bad enough that terrain alone won't fix
+  // it. That ordering is what keeps the image sharp at a merely-adequate
+  // framerate instead of collapsing to minimum at the first hiccup.
   if (qualitySettle === 0 && now - lastResScaleCheck > 500) {
     lastResScaleCheck = now;
-    // How far short of target we are, 0..1. Steps scale with this so a heavy
-    // scene is cut back quickly while something only slightly short is
-    // nudged gently instead of over-correcting.
-    const deficit = Cesium.Math.clamp((FPS_TARGET - fpsSmoothed) / FPS_TARGET, 0, 1);
+    const floor = fpsFloor(), good = fpsGood();
+    const deficit = Cesium.Math.clamp((floor - fpsSmoothed) / floor, 0, 1);
     if (parked) {
       // Parked: climb back to full quality unconditionally. Recovery used to
       // be gated on reaching a target framerate, so on a machine that can't
@@ -1747,13 +1794,19 @@ function tick() {
         currentTerrainSSE = Math.max(settings.terrainDetail, currentTerrainSSE - 0.5);
         viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
       }
-    } else if (fpsSmoothed < FPS_TARGET) {
-      if (currentTerrainSSE < TERRAIN_SSE_WORST) {
-        currentTerrainSSE = Math.min(TERRAIN_SSE_WORST, currentTerrainSSE + 0.5 + 3 * deficit);
+    } else if (fpsSmoothed < floor) {
+      const terrainSpent = currentTerrainSSE >= TERRAIN_SSE_WORST;
+      if (!terrainSpent) {
+        currentTerrainSSE = Math.min(TERRAIN_SSE_WORST, currentTerrainSSE + 0.5 + 2 * deficit);
         viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
       }
-      setResolutionScale(currentResolutionScale - (0.05 + 0.2 * deficit));
-    } else if (fpsSmoothed > FPS_RECOVER) {
+      // Resolution is the last resort: only once terrain is exhausted, or
+      // when we're missing by a wide margin and coarsening ground alone
+      // clearly isn't going to close the gap.
+      if ((terrainSpent || deficit > 0.35) && currentResolutionScale > settings.minResolutionScale) {
+        setResolutionScale(currentResolutionScale - (0.03 + 0.07 * deficit));
+      }
+    } else if (fpsSmoothed > good) {
       if (currentResolutionScale < settings.maxResolutionScale) {
         setResolutionScale(currentResolutionScale + 0.05);
       } else if (currentTerrainSSE > settings.terrainDetail) {
@@ -1875,6 +1928,52 @@ function drawAttitude(pitchDeg) {
   ctx.fillText(pitchDeg.toFixed(0) + '°', cx, h - 6);
 }
 requestAnimationFrame(tick);
+
+// ---- Startup gate.
+// The camera starts parked over Fuji, and for the first few seconds that view
+// is a blue sphere with tiles popping in. Holding the curtain until the scene
+// reports itself loaded means the first thing seen is actual terrain.
+//
+// It has to be escapable: globe.tilesLoaded can stay false indefinitely on a
+// slow connection, and a loading screen with no way out would be worse than
+// an unfinished view. So there's a hard timeout and a skip button.
+(function startupGate() {
+  const el = document.getElementById('loading');
+  const bar = document.getElementById('loadingBar');
+  const msg = document.getElementById('loadingMsg');
+  const started = performance.now();
+  const MAX_WAIT = 12000;
+  let finished = false;
+
+  function finish(reason) {
+    if (finished) return;
+    finished = true;
+    clearInterval(poll);
+    bar.style.width = '100%';
+    el.classList.add('done');
+    setTimeout(() => el.remove(), 600);
+    // The gate held the first frames back, so make sure the overlays are
+    // drawn for wherever the camera actually ended up.
+    overlayDirty = true;
+  }
+
+  document.getElementById('loadingSkip').addEventListener('click', () => finish('skipped'));
+
+  const poll = setInterval(() => {
+    const waited = performance.now() - started;
+    const loaded = viewer.scene.globe.tilesLoaded;
+    const pending = Cesium.RequestScheduler.statistics.numberOfActiveRequests;
+
+    // No honest completion percentage exists here -- Cesium doesn't publish
+    // "tiles still to fetch". Show elapsed-time progress, which at least
+    // moves steadily and reaches the end exactly when the timeout does.
+    bar.style.width = Math.min(95, (waited / MAX_WAIT) * 100) + '%';
+    if (pending > 0) msg.textContent = `地形とタイルを読み込んでいます… (${pending})`;
+
+    if (loaded && pending === 0 && waited > 800) finish('loaded');
+    else if (waited > MAX_WAIT) finish('timeout');
+  }, 200);
+})();
 
 // Persist tile cache across sessions: a service worker cache-first-fetches
 // OpenTopoMap/ArcGIS tiles into Cache Storage so a previously-flown-over
