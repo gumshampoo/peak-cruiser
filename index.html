@@ -42,11 +42,11 @@
   /* Every label leans the same way. Mirroring the ones near the right edge
      was tried and dropped: the two directions crossed over each other, and
      running off the side edge is harmless anyway. */
+  /* All peaks are styled the same on the 3D view. Rank badges and colour
+     were tried and dropped: they made the skyline read as a ranking rather
+     than a landscape. Which list a peak belongs to is answered by the
+     nearby-peaks panel, where there's room to say it plainly. */
   .peak-label .name { font-size: 13px; font-weight: bold; }
-  /* The 100 famous mountains are what the eye is usually hunting for, so they
-     get size and colour on top of the star; the 300-list gets dimmed back. */
-  .peak-label.r100 .name { font-size: 15px; color: #ffe082; }
-  .peak-label.r300 .name { font-size: 12px; opacity: 0.85; }
   .peak-label .dist { font-size: 10px; opacity: 0.85; margin-left: 4px; }
   .peak-label .line {
     position: absolute; left: 0; bottom: 0; width: 1px;
@@ -955,9 +955,8 @@ function bearingDeg(lat1, lon1, lat2, lon2) {
   return (Cesium.Math.toDegrees(Math.atan2(y, x)) + 360) % 360;
 }
 
-// One glyph per list, used both in the nearby panel and on the 3D labels, so
-// "is this one of the famous hundred?" is answerable at a glance instead of
-// having to remember what a colour meant.
+// One glyph per list, for the nearby panel. Deliberately NOT used on the 3D
+// labels -- badges and colour there turned the skyline into a ranking.
 const RANK_BADGE = { 100: '★', 200: '☆', 300: '·' };
 
 const nearbyPanel = document.getElementById('nearbyPanel');
@@ -1116,7 +1115,7 @@ function updatePeakLabels() {
   for (const { peak, win, distance } of shown) {
     if (!peak.el) {
       const el = document.createElement('div');
-      el.className = `peak-label r${peak.rank}`;
+      el.className = 'peak-label';
       el.innerHTML = `<span class="rot"><span class="name"></span><span class="dist"></span></span>`
         + `<span class="line"></span><span class="dot"></span>`;
       peakLabelsEl.appendChild(el);
@@ -1138,7 +1137,7 @@ function updatePeakLabels() {
     peak.el.style.top = win.y + 'px';
     // The name never changes for a given peak -- only write it once.
     if (peak.lastName !== peak.name) {
-      peak.elName.textContent = `${RANK_BADGE[peak.rank] || ''}${peak.name}`;
+      peak.elName.textContent = peak.name;
       peak.lastName = peak.name;
     }
     peak.elDist.textContent = `${(distance / 1000).toFixed(1)} km / ${peak.elev} m`;
