@@ -72,16 +72,6 @@
   #settingsPanel .row { margin-bottom: 12px; }
   #settingsPanel label { display: flex; justify-content: space-between; margin-bottom: 3px; }
   #settingsPanel input[type=range] { width: 100%; }
-  /* Texture stack: checkbox to include a layer, slider for how strongly it
-     shows through the ones beneath it. */
-  .imgrow { margin: 4px 0 6px; }
-  .imgrow label {
-    display: flex; align-items: center; gap: 6px; cursor: pointer;
-    justify-content: flex-start; margin-bottom: 2px;
-  }
-  .imgrow input[type=checkbox] { width: auto; }
-  .imgrow input[type=range] { width: 100%; }
-  .imgrow.off { opacity: 0.45; }
   #settingsPanel button.reset {
     width: 100%; padding: 5px; cursor: pointer; margin-top: 4px;
   }
@@ -278,8 +268,8 @@
     </label>
   </div>
   <div class="row">
-    <label><span>地表テクスチャ（重ねられます）</span></label>
-    <div id="imageryList"></div>
+    <label><span>地表テクスチャ</span></label>
+    <select id="s_imagery" style="width:100%; padding:4px;"></select>
   </div>
   <div class="row">
     <label><span>遠景のかすみ</span><span id="v_fogDensity"></span></label>
@@ -337,41 +327,41 @@ const GSI_CREDIT = '国土地理院';
 // One entry per layer, freely combinable. Order here is bottom-to-top on the
 // globe, so a base map sits under the shading and colour washes that
 // modulate it. Each carries a default opacity suited to being stacked.
-const IMAGERY_LAYERS = [
-  { id: 'opentopo', label: '地形図 (OpenTopoMap)', alpha: 1,
-    spec: { url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
-            subdomains: ['a','b','c'], credit: '© OpenTopoMap (CC-BY-SA)', maximumLevel: 16 } },
-  { id: 'std', label: '標準地図', alpha: 1,
-    spec: { url: `${GSI}/std/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } },
-  { id: 'pale', label: '淡色地図', alpha: 1,
-    spec: { url: `${GSI}/pale/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } },
-  { id: 'photo', label: '航空写真', alpha: 1,
-    spec: { url: `${GSI}/seamlessphoto/{z}/{x}/{y}.jpg`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } },
-  // minimumLevel matters as much as maximumLevel: each GSI layer only exists
-  // over a specific zoom range, and without a floor Cesium happily asks for
-  // z0-4 and collects a pile of 404s on every load.
-  { id: 'relief', label: '色別標高図 (グラデーション)', alpha: 0.75,
-    spec: { url: `${GSI}/relief/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 5, maximumLevel: 15 } },
-  { id: 'shade', label: '陰影起伏図', alpha: 0.55,
-    spec: { url: `${GSI}/hillshademap/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 16 } },
+// A fixed set of looks, one at a time. Free-form stacking was tried and
+// dropped: most combinations muddied each other, and the one that genuinely
+// worked (elevation colour under a hillshade) is better shipped as a
+// deliberate preset than left for the user to rediscover.
+const IMAGERY_OPTIONS = [
+  { id: 'opentopo', label: '地形図 (OpenTopoMap)', layers: [
+    { url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+      subdomains: ['a','b','c'], credit: '© OpenTopoMap (CC-BY-SA)', maximumLevel: 16 } ] },
+  // minimumLevel matters as much as maximumLevel here: each GSI layer only
+  // exists over a specific zoom range, and without a floor Cesium happily
+  // asks for z0-4 and collects a pile of 404s on every load.
+  { id: 'relief', label: '色別標高図 (グラデーション)', layers: [
+    { url: `${GSI}/relief/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 5, maximumLevel: 15 } ] },
+  // The one combination worth keeping: elevation colour says "how high",
+  // the hillshade over it says "what shape".
+  { id: 'relief_shade', label: '色別標高図＋陰影 (おすすめ)', layers: [
+    { url: `${GSI}/relief/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 5, maximumLevel: 15 },
+    { url: `${GSI}/hillshademap/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 16, alpha: 0.55 } ] },
+  { id: 'photo', label: '航空写真', layers: [
+    { url: `${GSI}/seamlessphoto/{z}/{x}/{y}.jpg`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
+  { id: 'pale', label: '淡色地図', layers: [
+    { url: `${GSI}/pale/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
+  { id: 'shade', label: '陰影起伏図のみ (白黒)', layers: [
+    { url: `${GSI}/hillshademap/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 16 } ] },
+  { id: 'std', label: '標準地図', layers: [
+    { url: `${GSI}/std/{z}/{x}/{y}.png`, credit: GSI_CREDIT, minimumLevel: 2, maximumLevel: 18 } ] },
 ];
 
 function applyImagery() {
+  const opt = IMAGERY_OPTIONS.find(o => o.id === settings.imagery) || IMAGERY_OPTIONS[0];
   viewer.imageryLayers.removeAll();
-  let added = 0;
-  for (const def of IMAGERY_LAYERS) {
-    const conf = settings.imagery[def.id];
-    if (!conf || !conf.on) continue;
+  for (const spec of opt.layers) {
     const layer = viewer.imageryLayers.addImageryProvider(
-      new Cesium.UrlTemplateImageryProvider(def.spec));
-    layer.alpha = conf.alpha;
-    added++;
-  }
-  // Every layer switched off would leave the bare globe colour showing, which
-  // reads as a bug rather than a choice -- fall back to the base map.
-  if (added === 0) {
-    const def = IMAGERY_LAYERS[0];
-    viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider(def.spec));
+      new Cesium.UrlTemplateImageryProvider(spec));
+    if (spec.alpha !== undefined) layer.alpha = spec.alpha;
   }
   viewer.scene.requestRender();
 }
@@ -1205,15 +1195,7 @@ const DEFAULTS = {
   terrainDetail: 1.0,        // best terrain screen-space error (smaller = finer)
   labelFarOpacity: 0.3,      // opacity of the most distant labels (0 = fade out)
   japanOnly: true,           // don't render globe outside Japan at all
-  // Per-layer {on, alpha}; layers stack bottom-to-top in IMAGERY_LAYERS order.
-  imagery: {
-    opentopo: { on: true,  alpha: 1 },
-    std:      { on: false, alpha: 1 },
-    pale:     { on: false, alpha: 1 },
-    photo:    { on: false, alpha: 1 },
-    relief:   { on: false, alpha: 0.75 },
-    shade:    { on: false, alpha: 0.55 },
-  },
+  imagery: 'opentopo',       // surface texture, see IMAGERY_OPTIONS
   fogDensity: 0.5,           // multiplier on Cesium's default haze; 0 = off
   sunLighting: false,        // shade terrain by real sun position
   timeOfDay: 10,             // hours, JST, used when sunLighting is on
@@ -1227,6 +1209,12 @@ let settings = { ...DEFAULTS };
 try {
   const saved = JSON.parse(localStorage.getItem('mountainFlightSettings') || '{}');
   settings = { ...DEFAULTS, ...saved };
+  // Stored settings outlive the code that wrote them. `imagery` briefly held
+  // a per-layer stacking object; anything that isn't a known preset id gets
+  // dropped rather than left to render an empty dropdown.
+  if (!IMAGERY_OPTIONS.some(o => o.id === settings.imagery)) {
+    settings.imagery = DEFAULTS.imagery;
+  }
 } catch (e) { /* ignore corrupt storage */ }
 
 function saveSettings() {
@@ -1289,6 +1277,7 @@ function refreshSettingsUI() {
   document.getElementById('c_japanOnly').checked = settings.japanOnly;
   document.getElementById('c_sunLighting').checked = settings.sunLighting;
   document.getElementById('c_pauseWhenUnfocused').checked = settings.pauseWhenUnfocused;
+  document.getElementById('s_imagery').value = settings.imagery;
 }
 // Yes: rendering the rest of the world does cost. Looking at the horizon
 // throws a frustum thousands of km deep, and Cesium dutifully streams coarse
@@ -1426,27 +1415,17 @@ document.addEventListener('visibilitychange', () => {
   applyFocusState();
 });
 
-// Build one row per layer: a checkbox to include it and a slider for how
-// strongly it shows through whatever is beneath.
-const imageryListEl = document.getElementById('imageryList');
-for (const def of IMAGERY_LAYERS) {
-  const conf = settings.imagery[def.id] || (settings.imagery[def.id] = { on: false, alpha: def.alpha });
-  const row = document.createElement('div');
-  row.className = 'imgrow';
-  row.innerHTML =
-    `<label><input type="checkbox" ${conf.on ? 'checked' : ''}><span>${def.label}</span></label>` +
-    `<input type="range" min="0.1" max="1" step="0.05" value="${conf.alpha}">`;
-  const [cb, sl] = [row.querySelector('input[type=checkbox]'), row.querySelector('input[type=range]')];
-  const sync = () => { row.classList.toggle('off', !conf.on); sl.disabled = !conf.on; };
-  cb.addEventListener('change', () => {
-    conf.on = cb.checked; saveSettings(); sync(); applyImagery();
-  });
-  sl.addEventListener('input', () => {
-    conf.alpha = parseFloat(sl.value); saveSettings(); applyImagery();
-  });
-  sync();
-  imageryListEl.appendChild(row);
+const imagerySelect = document.getElementById('s_imagery');
+for (const o of IMAGERY_OPTIONS) {
+  imagerySelect.appendChild(Object.assign(document.createElement('option'),
+    { value: o.id, textContent: o.label }));
 }
+imagerySelect.value = settings.imagery;
+imagerySelect.addEventListener('change', (e) => {
+  settings.imagery = e.target.value;
+  saveSettings();
+  applyImagery();
+});
 applyImagery();
 document.getElementById('c_japanOnly').addEventListener('change', (e) => {
   settings.japanOnly = e.target.checked;
