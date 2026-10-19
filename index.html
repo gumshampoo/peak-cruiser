@@ -229,6 +229,12 @@
       <span>輪郭のギザギザを消す (FXAA)</span>
     </label>
   </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_coarseWhileMoving" style="width:auto;">
+      <span>移動中は地形を粗くして軽くする</span>
+    </label>
+  </div>
   <hr style="border:none; border-top:1px solid rgba(255,255,255,0.2); margin:12px 0 10px;">
   <div class="row">
     <label><span>ラベルを付ける山</span></label>
@@ -948,6 +954,7 @@ async function applyPeakSet() {
   labelsOnScreen = labelsOnScreen.filter(p => keep.has(p));
   overlayDirty = true;
   minimapDirty = true;
+  wake();
 }
 // All labels share one text row, so the names line up instead of bobbing
 // with each summit's height. The row isn't a fixed screen position though:
@@ -1154,26 +1161,38 @@ setInterval(updateNearbyList, 700);
 // 300m a pixel) are decoded into plain Float32Arrays, and a line of sight is
 // a few hundred array reads -- tens of microseconds per peak. It runs off a
 // timer with a small time budget, so it can never hold up a frame.
-const DEM_Z = 9;
 const DEM_NA = 8388608;          // 2^23: "no data" (sea)
-const demTiles = new Map();      // "x/y" -> Float32Array | 'loading' | 'sea'
-let demLoading = 0;
-let demEpoch = 0;                // bumped whenever a tile arrives
-function demTile(tx, ty) {
+// Two grids: a coarse one (z9, ~300m) wide enough for lines of sight across
+// a whole mountain range, and a fine one (z12, ~38m) that only ever needs
+// the few tiles under the camera, for "how high am I above the ground".
+function makeDemCache(z, maxTiles) {
+  return { z, maxTiles, tiles: new Map(), loading: 0 };
+}
+const demCoarse = makeDemCache(9, Infinity);
+const demFine = makeDemCache(12, 16);
+let demEpoch = 0;                // bumped whenever a coarse tile arrives
+function demTile(cache, tx, ty) {
   const key = tx + '/' + ty;
-  const t = demTiles.get(key);
+  const t = cache.tiles.get(key);
   if (t !== undefined) return t;
-  if (demLoading >= 4) return 'loading';
-  demTiles.set(key, 'loading');
-  demLoading++;
-  fetch(`${GSI}/dem_png/${DEM_Z}/${tx}/${ty}.png`)
+  if (cache.loading >= 4) return 'loading';
+  // The fine cache follows the camera around; drop the oldest finished tile
+  // (Map keeps insertion order) rather than letting it grow without limit.
+  if (cache.tiles.size >= cache.maxTiles) {
+    for (const [k, v] of cache.tiles) {
+      if (v !== 'loading') { cache.tiles.delete(k); break; }
+    }
+  }
+  cache.tiles.set(key, 'loading');
+  cache.loading++;
+  fetch(`${GSI}/dem_png/${cache.z}/${tx}/${ty}.png`)
     .then(r => {
       if (r.status === 404) return null; // outside Japan's coverage: open sea
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.blob();
     })
     .then(async blob => {
-      if (!blob) { demTiles.set(key, 'sea'); return; }
+      if (!blob) { cache.tiles.set(key, 'sea'); return; }
       // No colour management: the RGB values ARE the elevation.
       const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
       const cv = new OffscreenCanvas(256, 256);
@@ -1185,25 +1204,50 @@ function demTile(tx, ty) {
         const v = (px[i * 4] << 16) | (px[i * 4 + 1] << 8) | px[i * 4 + 2];
         h[i] = v === DEM_NA ? 0 : (v < DEM_NA ? v : v - 2 * DEM_NA) * 0.01;
       }
-      demTiles.set(key, h);
+      cache.tiles.set(key, h);
     })
-    .catch(() => demTiles.delete(key)) // transient failure: retry later
-    .finally(() => { demLoading--; demEpoch++; });
+    .catch(() => cache.tiles.delete(key)) // transient failure: retry later
+    .finally(() => { cache.loading--; if (cache === demCoarse) demEpoch++; });
   return 'loading';
 }
 // Ground height in metres, 0 for sea, null while the tile is still on its way.
-function demHeight(lon, lat) {
-  const n = 1 << DEM_Z;
+function demSample(cache, lon, lat) {
+  const n = 1 << cache.z;
   const fx = (lon + 180) / 360 * n;
-  const fy = tileYFrac(lat, DEM_Z);
+  const fy = tileYFrac(lat, cache.z);
   const tx = Math.floor(fx), ty = Math.floor(fy);
-  const t = demTile(tx, ty);
+  const t = demTile(cache, tx, ty);
   if (t === 'loading') return null;
   if (t === 'sea') return 0;
   const px = Math.min(255, Math.floor((fx - tx) * 256));
   const py = Math.min(255, Math.floor((fy - ty) * 256));
   return t[py * 256 + px];
 }
+function demHeight(lon, lat) { return demSample(demCoarse, lon, lat); }
+function groundHeight(lon, lat) {
+  const h = demSample(demFine, lon, lat);
+  return h !== null ? h : demSample(demCoarse, lon, lat);
+}
+
+// ---- v0.3.1: the single biggest CPU cost in the app, removed.
+// Cesium answers globe.getHeight() by ray-testing the loaded terrain mesh,
+// and ArcGIS's tiles are dense: measured at ~35ms a call (up to 63ms) on
+// this machine. Cesium calls it itself at least twice per moving frame --
+// the camera collision check and the scene's own camera-height bookkeeping
+// -- so flying held the main thread for 70ms+ a frame, the framerate sank
+// to 2-3fps, and the quality controller then wrecked the resolution trying
+// to fix a problem that was never the GPU's.
+//
+// Collision detection is for Cesium's mouse controller, which this app
+// doesn't fly with; the ground floor is enforced in tick() instead. The
+// remaining callers get the answer from the GSI elevation grid, which is
+// an array read.
+viewer.scene.screenSpaceCameraController.enableCollisionDetection = false;
+viewer.scene.globe.getHeight = function (cartographic) {
+  const h = groundHeight(Cesium.Math.toDegrees(cartographic.longitude),
+                         Cesium.Math.toDegrees(cartographic.latitude));
+  return h === null ? undefined : h;
+};
 
 // Does the ground anywhere between the camera and the summit rise above the
 // straight line joining them? Earth curvature is included: along a chord of
@@ -1231,8 +1275,13 @@ function ridgeBlocks(peak, camLon, camLat, camH, dist) {
 // Filled in by updatePeakLabels: on-screen candidates in priority order.
 let occlCandidates = [];
 const OCCL_BUDGET_MS = 5;
+let occlLastEpoch = -1;
 setInterval(() => {
   if (!settings.hideOccluded || !windowFocused || occlCandidates.length === 0) return;
+  // Asleep, the camera can't have moved: only new elevation data can change
+  // an answer, so don't even wake the thread to check otherwise.
+  if (sleeping && demEpoch === occlLastEpoch) return;
+  occlLastEpoch = demEpoch;
   const t0 = performance.now();
   const camPos = viewer.camera.positionWC;
   const carto = Cesium.Cartographic.fromCartesian(camPos);
@@ -1253,7 +1302,7 @@ setInterval(() => {
     const occ = r === true;
     if (occ !== p.occluded) { p.occluded = occ; changed = true; }
   }
-  if (changed) overlayDirty = true;
+  if (changed) { overlayDirty = true; wake(); }
 }, 80);
 
 // Cosine of the half-angle of a cone that contains the whole frustum, with a
@@ -1487,7 +1536,8 @@ const DEFAULTS = {
   tileRequests: 24,          // concurrent tile downloads
   inputSmoothing: 0.12,      // seconds of lag on stick input (0 = raw)
   // ---- v0.3 ----
-  skyAtmosphere: true,       // gradient sky with atmospheric scattering
+  skyAtmosphere: false,      // gradient sky with atmospheric scattering (GPU cost)
+  coarseWhileMoving: true,   // halve terrain detail while flying, restore when parked
   antiAlias: false,          // FXAA pass
   peakSet: '1500',           // 'meizan' | '1500' | '1000' | 'all'
   maxLabels: 50,             // clutter ceiling for names on screen at once
@@ -1499,7 +1549,7 @@ const DEFAULTS = {
 // afterwards.
 const QUALITY_PRESETS = {
   light:    { maxResolutionScale: 0.5,  terrainDetail: 2.0, fpsCap: 24, skyAtmosphere: false, antiAlias: false, fogDensity: 0.5 },
-  standard: { maxResolutionScale: 0.65, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: true,  antiAlias: false, fogDensity: 0.5 },
+  standard: { maxResolutionScale: 0.65, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: false, antiAlias: false, fogDensity: 0.5 },
   high:     { maxResolutionScale: 1.0,  terrainDetail: 1.0, fpsCap: 60, skyAtmosphere: true,  antiAlias: true,  fogDensity: 0.7 },
 };
 let settings = { ...DEFAULTS };
@@ -1583,6 +1633,7 @@ function refreshSettingsUI() {
   document.getElementById('c_skyAtmosphere').checked = settings.skyAtmosphere;
   document.getElementById('c_antiAlias').checked = settings.antiAlias;
   document.getElementById('c_hideOccluded').checked = settings.hideOccluded;
+  document.getElementById('c_coarseWhileMoving').checked = settings.coarseWhileMoving;
   document.getElementById('s_peakSet').value = settings.peakSet;
 }
 // Yes: rendering the rest of the world does cost. Looking at the horizon
@@ -1696,7 +1747,7 @@ function applyFocusState() {
   if (idleStopTimer !== null) { clearInterval(idleStopTimer); idleStopTimer = null; }
 
   if (windowFocused || !settings.pauseWhenUnfocused) {
-    if (!viewer.useDefaultRenderLoop) viewer.useDefaultRenderLoop = true;
+    if (!sleeping && !viewer.useDefaultRenderLoop) viewer.useDefaultRenderLoop = true;
     return;
   }
   // Unfocused: keep rendering only until the outstanding loading and drawing
@@ -1711,6 +1762,45 @@ function applyFocusState() {
   idleStopTimer = setInterval(stopWhenDone, 400);
 }
 window.addEventListener('blur', () => { windowFocused = false; applyFocusState(); });
+
+// ---- Sleep while parked (v0.3.1).
+// requestRenderMode already stops Cesium DRAWING when nothing changes, but
+// its loop still wakes 60 times a second to check, and tick() still runs at
+// the frame cap. Once the camera has been still for a moment and every tile
+// has arrived, there is genuinely nothing to do -- so stop the loop outright,
+// and restart it the instant anything could change the picture: device
+// input, keys, the mouse on the globe, a settings control, a resize, or late
+// data (labels, minimap) arriving.
+const SLEEP_AFTER_MS = 1500;
+let sleeping = false;
+function sleepNow() {
+  if (sleeping) return;
+  sleeping = true;
+  viewer.useDefaultRenderLoop = false;
+  if (padConnected) padWakeTimer = setInterval(pollPadWhileAsleep, 100);
+}
+function wake() {
+  if (!sleeping) return;
+  sleeping = false;
+  if (padWakeTimer !== null) { clearInterval(padWakeTimer); padWakeTimer = null; }
+  idleMs = 0;
+  // The gap would otherwise arrive as one huge frame step.
+  lastTime = performance.now();
+  if (windowFocused || !settings.pauseWhenUnfocused) viewer.useDefaultRenderLoop = true;
+  viewer.scene.requestRender();
+}
+// The Gamepad API can only be polled, so a sleeping app checks it slowly.
+let padWakeTimer = null;
+function pollPadWhileAsleep() {
+  const gp = [...navigator.getGamepads()].find(g => g && g.connected);
+  if (!gp) return;
+  if (gp.axes.some(v => Math.abs(v) > PAD_DEADZONE) || gp.buttons.some(b => b.pressed)) wake();
+}
+for (const type of ['keydown', 'pointerdown', 'wheel', 'resize']) {
+  window.addEventListener(type, wake, { passive: true });
+}
+document.getElementById('settingsPanel').addEventListener('input', wake);
+document.getElementById('settingsPanel').addEventListener('change', wake);
 window.addEventListener('focus', () => {
   windowFocused = true;
   // Reset the frame clock too: without this the whole idle gap arrives as
@@ -1825,6 +1915,7 @@ for (const [id, key, apply] of [
   ['c_skyAtmosphere', 'skyAtmosphere', applyRealism],
   ['c_antiAlias', 'antiAlias', applyRealism],
   ['c_hideOccluded', 'hideOccluded', () => { overlayDirty = true; }],
+  ['c_coarseWhileMoving', 'coarseWhileMoving', () => {}],
 ]) {
   document.getElementById(id).addEventListener('change', (e) => {
     settings[key] = e.target.checked;
@@ -1881,6 +1972,14 @@ function zeroStick() {
 }
 
 function onHidReport(event) {
+  if (sleeping) {
+    // Only real deflection wakes us: the idle puck still reports zeros.
+    const d0 = event.data;
+    for (let i = 0; i + 1 < d0.byteLength; i += 2) {
+      if (Math.abs(d0.getInt16(i, true)) / AXIS_MAX >= settings.deadzone) { wake(); break; }
+    }
+    if (event.reportId === 3) wake();
+  }
   const d = event.data;
   const n = i => deadzone(d.getInt16(i, true) / AXIS_MAX);
   if (event.reportId === 1 && d.byteLength >= 12) {
@@ -1908,7 +2007,8 @@ async function openSpaceMouse(device) {
     if (!device.opened) await device.open();
   } catch (e) {
     // The usual cause: 3Dconnexion's own driver (3DxWare) holds the device.
-    setStatus('開けません: 3DxWare(純正ドライバ)を終了してください', false);
+    // That's fine when the driver route below is connected.
+    if (!nl.ready) setStatus('ドライバ経由で接続を待っています… (3DxWare が必要)', false);
     return;
   }
   if (hidDevice && hidDevice !== device) hidDevice.removeEventListener('inputreport', onHidReport);
@@ -2022,6 +2122,7 @@ function pollKeyboard() {
 function updateInputSources() {
   const parts = ['キーボード'];
   if (hidDevice) parts.unshift('SpaceMouse');
+  if (nl.ready) parts.unshift('SpaceMouse (ドライバ経由)');
   if (padConnected) parts.push('ゲームパッド');
   document.getElementById('inputSources').textContent = parts.join(' + ');
 }
@@ -2029,6 +2130,146 @@ function updateInputSources() {
 // Ease pitch back to level. Set by a button, H, or gamepad A; cleared by
 // tick() once the view is level or the pitch stick is touched.
 let levelRequested = false;
+
+// ---- SpaceMouse through the 3Dconnexion driver (v0.3.1) ----
+//
+// With 3DxWare 10 running, the driver holds the device and WebHID can't open
+// it. The driver does, however, run a local "navigation proxy" (3DxNLServer)
+// that web apps talk to over a WebSocket, via 3Dconnexion's 3DconnexionJS
+// library. That route is used whenever it's available, so the driver can
+// stay running for every other app; WebHID remains the fallback for when
+// it isn't installed.
+//
+// The navigation library is built for CAD: it doesn't hand out stick values,
+// it moves a camera around a model and sends back the new camera matrix each
+// frame. So this side keeps a stand-in camera that the driver flies, and
+// reads the stick back out of how far it moved:
+//
+// * The stand-in camera sits 1000 units from a tiny model at the origin.
+//   Translation speed in the navlib is proportional to the distance from the
+//   model, and the driver only reads the camera once per stroke, so within a
+//   stroke the step grows (or shrinks) exponentially. Dividing each step by
+//   the current distance cancels that out: measured, the ratio holds steady
+//   at ~4.7-5.0 per second at full deflection however far the camera has run.
+// * The pivot is the camera itself, so rotations turn on the spot rather
+//   than orbiting.
+// * The driver works in "object mode": pushing forward moves the model away,
+//   i.e. the camera BACK. Every axis is therefore negated back into what the
+//   hand did.
+const NL_SCRIPT = 'https://cdn.jsdelivr.net/npm/@3dconnexion/3dconnexionjs@0.8.1/build/3dconnexion.min.js';
+const NL_TRANS_FULL = 5.0;   // distance-normalised speed (1/s) at full deflection
+const NL_ROT_FULL = 5.0;     // rad/s at full deflection
+const NL_START = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1000, 1];
+const nl = { x: 0, y: 0, z: 0, rx: 0, rz: 0, ready: false, moving: false };
+let nlMat = NL_START();
+let nlLastSet = 0;
+let nlMouse = null;
+
+function nlSetViewMatrix(m) {
+  const now = performance.now();
+  const dt = nlLastSet ? Math.max(0.004, (now - nlLastSet) / 1000) : 1 / 60;
+  nlLastSet = now;
+  const R = nlMat;
+  const dist = Math.hypot(R[12], R[13], R[14]);
+  if (!m.every(Number.isFinite) || dist < 1e-6 || dist > 1e250) {
+    // A very long stroke has run the stand-in camera out of range. Hold
+    // still until the hand lets go and the next stroke starts fresh.
+    nl.x = nl.y = nl.z = nl.rx = nl.rz = 0;
+    return;
+  }
+  // World step, expressed in the old camera's own axes (x right, y up, z back).
+  const dx = m[12] - R[12], dy = m[13] - R[13], dz = m[14] - R[14];
+  const tx = R[0] * dx + R[1] * dy + R[2] * dz;
+  const ty = R[4] * dx + R[5] * dy + R[6] * dz;
+  const tz = R[8] * dx + R[9] * dy + R[10] * dz;
+  // Small-angle rotation B = R^T * M ~ I + [w]x, read off its antisymmetric
+  // part: B[r][c] is old-axis r dotted with new-axis c. wx > 0 = nose up,
+  // wy > 0 = turning left.
+  const col = (A, c, r) => A[c * 4 + r];
+  const dot = (r, c) => col(R, r, 0) * col(m, c, 0) + col(R, r, 1) * col(m, c, 1) + col(R, r, 2) * col(m, c, 2);
+  const wx = (dot(2, 1) - dot(1, 2)) / 2;
+  const wy = (dot(0, 2) - dot(2, 0)) / 2;
+  nlMat = m;
+  const k = 1 / (dist * dt * NL_TRANS_FULL);
+  const clamp1 = v => Math.max(-1, Math.min(1, v));
+  // Negated: object mode reports the camera moving opposite to the hand.
+  nl.x = clamp1(-tx * k);
+  nl.y = clamp1(-tz * k);          // forward push -> camera +z -> stick y negative
+  nl.z = clamp1(ty * k);           // lift -> camera down -> stick z negative (= climb)
+  nl.rx = clamp1(-wx / (dt * NL_ROT_FULL));
+  nl.rz = clamp1(wy / (dt * NL_ROT_FULL));
+}
+
+function nlStop() {
+  nl.moving = false;
+  nl.x = nl.y = nl.z = nl.rx = nl.rz = 0;
+  nlMat = NL_START();
+  nlLastSet = 0;
+}
+
+const nlClient = {
+  getViewMatrix: () => nlMat,
+  getCoordinateSystem: () => NL_START().map((v, i) => (i === 14 ? 0 : v)),
+  getFrontView: () => NL_START().map((v, i) => (i === 14 ? 0 : v)),
+  getFov: () => Cesium.Math.toRadians(60),
+  getPerspective: () => true,
+  getViewRotatable: () => true,
+  getViewExtents: () => [-1, -1, -1000, 1, 1, -1],
+  getViewFrustum: () => { const t = Math.tan(Math.PI / 6); return [-t * 1.5, t * 1.5, -t, t, 1, 1e6]; },
+  getModelExtents: () => [-1, -1, -1, 1, 1, 1],
+  getPivotPosition: () => [nlMat[12], nlMat[13], nlMat[14]],
+  getLookAt: () => null,
+  getUnitsToMeters: () => 1,
+  getFloorPlane: () => [0, 1, 0, 0],
+  getSelectionEmpty: () => true,
+  getPointerPosition: () => [0, 0, 0],
+  getFrameTimingSource: () => 1,
+  getFrameTime: () => performance.now(),
+  setViewMatrix: nlSetViewMatrix,
+  setMoving() {}, setTransaction() {}, setTarget() {}, setFov() {}, setViewExtents() {},
+  setPivotPosition() {}, setPivotVisible() {}, setLookFrom() {}, setLookDirection() {},
+  setLookAperture() {}, setSelectionOnly() {}, setActiveCommand() {},
+  setKeyPress() {}, setKeyRelease() {}, setSettingsChanged() {},
+  onConnect() { nlMouse.create3dmouse(window, 'Peak Cruiser'); },
+  on3dmouseCreated() {
+    // We drive the frame clock (from tick), so motion is sampled exactly
+    // once per rendered frame.
+    nlMouse.update3dcontroller({ frame: { timingSource: 1 } });
+    nl.ready = true;
+    setStatus('接続: 3Dconnexion ドライバ経由', true);
+    connectBtn.textContent = 'SpaceMouse 接続済み';
+    updateInputSources();
+  },
+  onDisconnect() {
+    nl.ready = false;
+    nlStop();
+    updateInputSources();
+  },
+  onStartMotion() { nl.moving = true; nlLastSet = 0; wake(); },
+  onStopMotion: nlStop,
+};
+
+// Called once per frame from tick() while the driver reports motion.
+function nlFrame() {
+  if (!nl.ready || !nl.moving) return;
+  nlMouse.update3dcontroller({ frame: { time: performance.now() } }).catch(() => nlStop());
+}
+
+// Only worth trying where the proxy can exist (HTTPS or localhost pages, a
+// machine with 3DxWare). A missing proxy just means the library's query
+// fails quietly and WebHID stays the way in.
+(function loadNavlib() {
+  if (!window.isSecureContext) return;
+  const s = document.createElement('script');
+  s.src = NL_SCRIPT;
+  s.crossOrigin = 'anonymous';
+  s.onload = () => {
+    if (typeof _3Dconnexion !== 'function') return;
+    nlMouse = new _3Dconnexion(nlClient);
+    nlMouse.connect();
+  };
+  document.head.appendChild(s);
+})();
 
 // ---- per-frame camera update: pure flight-stick integration, no pivot ----
 let lastTime = performance.now();
@@ -2078,6 +2319,7 @@ setInterval(() => {
   // Parked camera, same answer: don't pay for the terrain query. (Tiles
   // still sharpening underneath can shift it slightly, hence the refresh
   // every few seconds regardless.)
+  if (sleeping) return;
   const pos = viewer.camera.position;
   const now = performance.now();
   if (Cesium.Cartesian3.equalsEpsilon(pos, lastHeightSamplePos, 0, 1) &&
@@ -2085,11 +2327,13 @@ setInterval(() => {
   Cesium.Cartesian3.clone(pos, lastHeightSamplePos);
   lastHeightSampleTime = now;
   const carto = Cesium.Cartographic.fromCartesian(pos);
-  const groundHeight = viewer.scene.globe.getHeight(carto) ?? 0;
-  targetHeightAboveGround = Math.max(0, carto.height - groundHeight);
+  const ground = viewer.scene.globe.getHeight(carto) ?? 0;
+  targetHeightAboveGround = Math.max(0, carto.height - ground);
 }, 150);
 let lastHeightSampleTime = 0;
 
+const GROUND_CLEARANCE = 15;     // m: closest the camera may get to the ground
+const scratchCarto = new Cesium.Cartographic();
 function tick() {
   const now = performance.now();
   const rawDt = Math.min((now - lastTime) / 1000, 0.1);
@@ -2111,14 +2355,15 @@ function tick() {
   // freely (keyboard to climb while the SpaceMouse steers, say).
   pollGamepad();
   pollKeyboard();
+  nlFrame();
   const clamp1 = v => Math.max(-1, Math.min(1, v));
   const tgt = {
-    x: clamp1(sm.x + pad.x + kb.x),
-    y: clamp1(sm.y + pad.y + kb.y),
-    z: clamp1(sm.z + pad.z + kb.z),
-    rx: clamp1(sm.rx + pad.rx + kb.rx),
+    x: clamp1(sm.x + pad.x + kb.x + nl.x),
+    y: clamp1(sm.y + pad.y + kb.y + nl.y),
+    z: clamp1(sm.z + pad.z + kb.z + nl.z),
+    rx: clamp1(sm.rx + pad.rx + kb.rx + nl.rx),
     ry: sm.ry,
-    rz: clamp1(sm.rz + pad.rz + kb.rz),
+    rz: clamp1(sm.rz + pad.rz + kb.rz + nl.rz),
   };
   const tau = settings.inputSmoothing;
   const k = tau > 0 ? 1 - Math.exp(-rawDt / tau) : 1;
@@ -2217,6 +2462,15 @@ function tick() {
     Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(zenith, -smIn.z * speed * dt, new Cesium.Cartesian3()), delta);
     Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(horiz, -smIn.y * speed * dt, new Cesium.Cartesian3()), delta);
     Cesium.Cartesian3.add(cam.position, delta, cam.position);
+    // Keep out of the ground. Cesium's own collision check was switched off
+    // for being too expensive (see the getHeight override), so this is now
+    // the only thing stopping a dive straight through a mountainside.
+    const after = Cesium.Cartographic.fromCartesian(cam.position, undefined, scratchCarto);
+    const ground = groundHeight(Cesium.Math.toDegrees(after.longitude), Cesium.Math.toDegrees(after.latitude));
+    if (ground !== null && after.height < ground + GROUND_CLEARANCE) {
+      after.height = ground + GROUND_CLEARANCE;
+      Cesium.Cartographic.toCartesian(after, undefined, cam.position);
+    }
   }
 
   cam.setView({ orientation: { direction, up } });
@@ -2285,6 +2539,13 @@ function tick() {
   // give, or when the shortfall is bad enough that terrain alone won't fix
   // it. That ordering is what keeps the image sharp at a merely-adequate
   // framerate instead of collapsing to minimum at the first hiccup.
+  // Flying: the eye can't take in fine terrain detail at speed anyway, and
+  // half the detail is roughly a quarter of the tiles to fetch, build and
+  // draw. The parked branch below sharpens it back once the camera stops.
+  const bestSSE = (!parked && settings.coarseWhileMoving)
+    ? settings.terrainDetail * 2 : settings.terrainDetail;
+  if (currentTerrainSSE < bestSSE) setTerrainSSE(bestSSE);
+
   if (qualitySettle === 0 && now - lastResScaleCheck > 500) {
     lastResScaleCheck = now;
     const floor = fpsFloor(), good = fpsGood();
@@ -2315,8 +2576,8 @@ function tick() {
     } else if (fpsSmoothed > good) {
       if (currentResolutionScale < settings.maxResolutionScale) {
         setResolutionScale(currentResolutionScale + 0.05);
-      } else if (currentTerrainSSE > settings.terrainDetail) {
-        setTerrainSSE(Math.max(settings.terrainDetail, currentTerrainSSE - 0.5));
+      } else if (currentTerrainSSE > bestSSE) {
+        setTerrainSSE(Math.max(bestSSE, currentTerrainSSE - 0.5));
       }
     }
   }
@@ -2368,6 +2629,15 @@ function tick() {
     minimapDirty = false;
     lastMinimapDraw = now;
     updateMinimap(carto, headingDeg);
+  }
+
+  // Everything settled? Then stop the loop until something wakes it.
+  if (idleMs > SLEEP_AFTER_MS && !overlayDirty && !minimapDirty && !nl.moving &&
+      keysDown.size === 0 && !pad.x && !pad.y && !pad.z && !pad.rx && !pad.rz &&
+      currentResolutionScale >= settings.maxResolutionScale - 1e-4 &&
+      currentTerrainSSE <= settings.terrainDetail + 1e-4 &&
+      !sceneHasPendingWork()) {
+    sleepNow();
   }
 }
 let lastHudUpdate = 0;
@@ -2491,6 +2761,7 @@ viewer.scene.preUpdate.addEventListener(tick);
     // The gate held the first frames back, so make sure the overlays are
     // drawn for wherever the camera actually ended up.
     overlayDirty = true;
+    wake();
   }
 
   document.getElementById('loadingSkip').addEventListener('click', () => finish('skipped'));
@@ -2581,7 +2852,7 @@ function ensureMinimapTiles(centerTileX, centerTileY, zoom) {
       // Assigned to minimapBg immediately below (not on load) -- tiles draw
       // into it progressively as each finishes, so the map fills in instead
       // of staying blank until every one of the 9 is done.
-      img.onload = () => { bgCtx.drawImage(img, dx * 256, dy * 256); minimapDirty = true; };
+      img.onload = () => { bgCtx.drawImage(img, dx * 256, dy * 256); minimapDirty = true; wake(); };
       // Plain OSM here rather than the OpenTopoMap used for the 3D globe:
       // at minimap size the topo shading/contours turn into visual noise,
       // while OSM's flat styling keeps roads, towns and coastline legible.

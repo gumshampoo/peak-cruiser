@@ -8,7 +8,8 @@
 ## できること
 
 - **SpaceMouse による 6DOF フライト**（WebHID 経由）。視線と移動方向が独立しているので、地形を見下ろしながら水平に飛べます
-  - 一度許可すれば、次回からはページを開くだけ・挿し直すだけで自動接続
+  - 3Dconnexion 純正ドライバ（3DxWare 10）が入っていれば、ドライバを動かしたままページを開くだけで自動接続（3DconnexionJS 経由）
+  - ドライバが無い環境では WebHID で直接接続。一度許可すれば、次回からはページを開くだけ・挿し直すだけで自動接続
   - 新しい 3Dconnexion 製品（SpaceMouse Compact / Wireless / Pro、ユニバーサルレシーバー）にも対応
 - **ゲームパッド・キーボードでも操作可能**（SpaceMouse と同時に使えます）
 - **日本三百名山 301 座＋OpenStreetMap の約 12,600 座**から、ラベルを付ける山の範囲・最大数・間隔を設定で選べます。PeakFinder 風の傾いたラベルが引き出し線で山頂を指します（重なるときは有名な山が優先）
@@ -25,9 +26,8 @@
 
 SpaceMouse を使うには:
 
-1. **Chrome または Edge** で開く（WebHID 対応ブラウザが必要）
-2. 3Dconnexion の純正ドライバを一時的に終了する（デバイスを排他的に掴んでいるため）
-3. 「SpaceMouse に接続」ボタンを押してデバイスを選択
+- **3DxWare 10 が入っている場合**：ページを開くだけで、ドライバ経由で自動的につながります（HTTPS か localhost で開くこと）
+- **ドライバが無い場合**：Chrome または Edge で開き、「SpaceMouse に接続」ボタンを押してデバイスを選択（WebHID）
 
 SpaceMouse が無くても、キーボードやゲームパッドで飛べます。
 
@@ -53,6 +53,7 @@ SpaceMouse が無くても、キーボードやゲームパッドで飛べます
 - その他の山の名前・座標・標高: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (ODbL)
 - 尾根の判定に使う標高: [国土地理院 標高タイル](https://maps.gsi.go.jp/development/demtile.html)
 - 描画: [CesiumJS](https://cesium.com/platform/cesiumjs/)
+- SpaceMouse（ドライバ経由）: [3DconnexionJS](https://www.npmjs.com/package/@3dconnexion/3dconnexionjs)（3Dconnexion SDK ライセンス。CDN から読み込み、このリポジトリには含めていません）
 
 ## 構成
 
