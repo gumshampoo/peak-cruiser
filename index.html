@@ -265,8 +265,12 @@
     <input type="range" id="s_moveSpeed" min="10" max="50000" step="10">
   </div>
   <div class="row">
-    <label><span>高度による加速</span><span id="v_altFactor"></span></label>
-    <input type="range" id="s_altFactor" min="0" max="10" step="0.05">
+    <label><span>高度に比例した速さ</span><span id="v_relSpeed"></span></label>
+    <input type="range" id="s_relSpeed" min="0.2" max="6" step="0.1">
+  </div>
+  <div class="row">
+    <label><span>押し続けたときの加速</span><span id="v_cruiseBoost"></span></label>
+    <input type="range" id="s_cruiseBoost" min="1" max="6" step="0.5">
   </div>
   <div class="row">
     <label><span>回転速度</span><span id="v_rotSpeed"></span></label>
@@ -1512,11 +1516,18 @@ let pitch = Cesium.Math.toRadians(-45);
 const DEFAULTS = {
   moveSpeed: 50,      // minimum m/s at full deflection -- just keeps things
                        // controllable right near the ground; speed relative
-                       // to the ground is meant to come from altFactor below
-  altFactor: 0.6,      // speed = altitude * altFactor -- makes ground-relative
-                       // speed roughly constant regardless of altitude (crossing
-                       // "one screen's worth of ground" takes about the same
-                       // time whether high up or low down)
+                       // to the ground is meant to come from relSpeed below
+  // v0.3.2: ground-relative speed. At full deflection the camera covers
+  // relSpeed times its own height above the ground every second, so the
+  // ground streams past the window at the same rate at 200m or 20km. This
+  // replaces v0.2's altFactor (0.6), which measured as far too slow: an
+  // ordinary push on the driver-connected SpaceMouse is only ~0.2 of full
+  // travel, which worked out at about 1/8 of your altitude per second.
+  relSpeed: 2.0,
+  // Holding a direction for more than a second ramps speed up further,
+  // reaching this multiple after another 3s; letting go resets it. For
+  // crossing between ranges without having to climb first.
+  cruiseBoost: 3,
   rotSpeed: 1.2,      // rad/s at full deflection
   deadzone: 0.06,
   maxResolutionScale: 0.65,  // ceiling for the adaptive resolution scaler below
@@ -1565,6 +1576,7 @@ try {
   // v0.2 stored the tile-download limit (12) as maxTileRequests; it had no
   // UI, so the old value would otherwise pin every existing install to it.
   delete settings.maxTileRequests;
+  delete settings.altFactor;           // superseded by relSpeed (v0.3.2)
 } catch (e) { /* ignore corrupt storage */ }
 
 function saveSettings() {
@@ -1602,7 +1614,8 @@ viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
 
 const SLIDER_DEFS = [
   { key: 'moveSpeed', slider: 's_moveSpeed', value: 'v_moveSpeed', fmt: v => v.toFixed(0) + ' m/s' },
-  { key: 'altFactor', slider: 's_altFactor', value: 'v_altFactor', fmt: v => v.toFixed(2) },
+  { key: 'relSpeed', slider: 's_relSpeed', value: 'v_relSpeed', fmt: v => `地表高度×${v.toFixed(1)} /秒` },
+  { key: 'cruiseBoost', slider: 's_cruiseBoost', value: 'v_cruiseBoost', fmt: v => v <= 1 ? 'なし' : `最大 ×${v.toFixed(1)}` },
   { key: 'rotSpeed',  slider: 's_rotSpeed',  value: 'v_rotSpeed',  fmt: v => v.toFixed(2) },
   { key: 'deadzone',  slider: 's_deadzone',  value: 'v_deadzone',  fmt: v => v.toFixed(2) },
   { key: 'maxResolutionScale', slider: 's_maxResolutionScale', value: 'v_maxResolutionScale', fmt: v => Math.round(v * 100) + '%' },
@@ -1743,23 +1756,33 @@ function sceneHasPendingWork() {
          Cesium.RequestScheduler.statistics.numberOfActiveRequests > 0;
 }
 
+// The ONE place that decides whether Cesium's loop runs. Focus handling and
+// sleep used to each switch it directly, and in the wrong order (sleep, lose
+// focus, wake while unfocused, regain focus) they left it off for good with
+// the window focused and nothing asleep: the app froze until something
+// happened to call wake() again.
+let drainingUnfocused = false;   // unfocused, but still finishing tile loads
+function updateRenderLoop() {
+  const active = windowFocused || !settings.pauseWhenUnfocused || drainingUnfocused;
+  const want = active && !sleeping;
+  if (viewer.useDefaultRenderLoop !== want) viewer.useDefaultRenderLoop = want;
+}
 function applyFocusState() {
   if (idleStopTimer !== null) { clearInterval(idleStopTimer); idleStopTimer = null; }
-
-  if (windowFocused || !settings.pauseWhenUnfocused) {
-    if (!sleeping && !viewer.useDefaultRenderLoop) viewer.useDefaultRenderLoop = true;
-    return;
+  drainingUnfocused = false;
+  if (!windowFocused && settings.pauseWhenUnfocused && sceneHasPendingWork()) {
+    // Unfocused: keep rendering only until the outstanding loading and
+    // drawing has finished, then go quiet. Checked on a slow timer -- it
+    // costs nothing and the exact moment we stop doesn't matter.
+    drainingUnfocused = true;
+    idleStopTimer = setInterval(() => {
+      if (sceneHasPendingWork()) return;
+      clearInterval(idleStopTimer); idleStopTimer = null;
+      drainingUnfocused = false;
+      updateRenderLoop();
+    }, 400);
   }
-  // Unfocused: keep rendering only until the outstanding loading and drawing
-  // has finished, then go quiet. Checked on a slow timer -- it costs nothing
-  // and the exact moment we stop doesn't matter.
-  const stopWhenDone = () => {
-    if (sceneHasPendingWork()) return;
-    clearInterval(idleStopTimer); idleStopTimer = null;
-    if (viewer.useDefaultRenderLoop) viewer.useDefaultRenderLoop = false;
-  };
-  if (!sceneHasPendingWork()) { stopWhenDone(); return; }
-  idleStopTimer = setInterval(stopWhenDone, 400);
+  updateRenderLoop();
 }
 window.addEventListener('blur', () => { windowFocused = false; applyFocusState(); });
 
@@ -1776,17 +1799,17 @@ let sleeping = false;
 function sleepNow() {
   if (sleeping) return;
   sleeping = true;
-  viewer.useDefaultRenderLoop = false;
+  updateRenderLoop();
   if (padConnected) padWakeTimer = setInterval(pollPadWhileAsleep, 100);
 }
 function wake() {
-  if (!sleeping) return;
+  if (!sleeping) { updateRenderLoop(); return; }
   sleeping = false;
   if (padWakeTimer !== null) { clearInterval(padWakeTimer); padWakeTimer = null; }
   idleMs = 0;
   // The gap would otherwise arrive as one huge frame step.
   lastTime = performance.now();
-  if (windowFocused || !settings.pauseWhenUnfocused) viewer.useDefaultRenderLoop = true;
+  updateRenderLoop();
   viewer.scene.requestRender();
 }
 // The Gamepad API can only be polled, so a sleeping app checks it slowly.
@@ -2162,23 +2185,50 @@ const NL_ROT_FULL = 5.0;     // rad/s at full deflection
 const NL_START = () => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1000, 1];
 const nl = { x: 0, y: 0, z: 0, rx: 0, rz: 0, ready: false, moving: false };
 let nlMat = NL_START();
-let nlLastSet = 0;
 let nlMouse = null;
 
+// How the stick is recovered without stutter. The navlib advances its
+// camera by however much FRAME TIME we tell it has passed, so the honest
+// divisor for a step is the gap between the frame times we sent -- not the
+// gap between arrivals, which jitters 0.6-64ms and made a steady push read
+// anywhere from 0.1 to 0.7. (A 200ms averaging window was tried next: still
+// +-17% surging, from whether 5 or 6 steps happened to fall inside it.)
+// So only one frame request is in flight at a time, the steps that come back
+// for it are summed, and that sum is divided by exactly the frame time it
+// covered.
+const nlAcc = { x: 0, y: 0, z: 0, rx: 0, rz: 0, n: 0 };
+let nlPending = false;
+let nlPendingAt = 0;
+let nlReqId = 0;          // bumped to orphan a request whose reply should be ignored
+let nlPrevSent = 0;       // frame time of the previous request (0 = stroke start)
+let nlLastDt = 0;
+let nlAccDt = 0;          // frame time covered by requests not yet matched with steps
+let nlEmptyMs = 0;        // frame time of consecutive replies with no step
+const NL_RELEASE_MS = 120; // that much nothing = the hand is off the cap
+const NL_REPLY_TIMEOUT_MS = 150;
+
 function nlSetViewMatrix(m) {
-  const now = performance.now();
-  const dt = nlLastSet ? Math.max(0.004, (now - nlLastSet) / 1000) : 1 / 60;
-  nlLastSet = now;
   const R = nlMat;
   const dist = Math.hypot(R[12], R[13], R[14]);
   if (!m.every(Number.isFinite) || dist < 1e-6 || dist > 1e250) {
     // A very long stroke has run the stand-in camera out of range. Hold
     // still until the hand lets go and the next stroke starts fresh.
-    nl.x = nl.y = nl.z = nl.rx = nl.rz = 0;
+    nlAcc.x = nlAcc.y = nlAcc.z = nlAcc.rx = nlAcc.rz = nlAcc.n = 0;
     return;
   }
-  // World step, expressed in the old camera's own axes (x right, y up, z back).
-  const dx = m[12] - R[12], dy = m[13] - R[13], dz = m[14] - R[14];
+  // World rotation of this step, Rw = Mrot * Rrot^T (column-major 3x3).
+  const Rw = (r, c) => m[r] * R[c] + m[4 + r] * R[4 + c] + m[8 + r] * R[8 + c];
+  // The driver turns the camera about the MODEL centre (the origin here),
+  // not about the camera -- confirmed by measurement, and it ignores the
+  // pivot we offer. Left in, every twist dragged the camera round a circle
+  // 1000 units across, which read as a near-full-speed sideways slide. So
+  // take out the orbit: what remains after rotating the old position about
+  // the origin is the genuine translation.
+  const px = R[12], py = R[13], pz = R[14];
+  const dx = m[12] - (Rw(0, 0) * px + Rw(0, 1) * py + Rw(0, 2) * pz);
+  const dy = m[13] - (Rw(1, 0) * px + Rw(1, 1) * py + Rw(1, 2) * pz);
+  const dz = m[14] - (Rw(2, 0) * px + Rw(2, 1) * py + Rw(2, 2) * pz);
+  // ...expressed in the old camera's own axes (x right, y up, z back).
   const tx = R[0] * dx + R[1] * dy + R[2] * dz;
   const ty = R[4] * dx + R[5] * dy + R[6] * dz;
   const tz = R[8] * dx + R[9] * dy + R[10] * dz;
@@ -2190,21 +2240,54 @@ function nlSetViewMatrix(m) {
   const wx = (dot(2, 1) - dot(1, 2)) / 2;
   const wy = (dot(0, 2) - dot(2, 0)) / 2;
   nlMat = m;
-  const k = 1 / (dist * dt * NL_TRANS_FULL);
-  const clamp1 = v => Math.max(-1, Math.min(1, v));
+  // Scaled so that "one full deflection held for one second" sums to 1.
   // Negated: object mode reports the camera moving opposite to the hand.
-  nl.x = clamp1(-tx * k);
-  nl.y = clamp1(-tz * k);          // forward push -> camera +z -> stick y negative
-  nl.z = clamp1(ty * k);           // lift -> camera down -> stick z negative (= climb)
-  nl.rx = clamp1(-wx / (dt * NL_ROT_FULL));
-  nl.rz = clamp1(wy / (dt * NL_ROT_FULL));
+  const kT = 1 / (dist * NL_TRANS_FULL);
+  nlAcc.x += -tx * kT;
+  nlAcc.y += -tz * kT;      // forward push -> camera +z -> stick y negative
+  nlAcc.z += ty * kT;       // lift -> camera down -> stick z negative (= climb)
+  nlAcc.rx += -wx / NL_ROT_FULL;
+  nlAcc.rz += wy / NL_ROT_FULL;
+  nlAcc.n++;
+}
+
+// A frame request has been answered: turn the steps it produced into stick
+// values. Steps that turn up late simply roll into the next reply, along
+// with the frame time they cover.
+function nlOnReply(dtMs) {
+  nlAccDt += dtMs;
+  if (nlAcc.n === 0) {
+    // Nothing moved. A step can simply turn up a reply late, so hold the
+    // current speed briefly; only a run of empty replies means the hand is
+    // off the cap -- then stop at once rather than coasting until the
+    // driver's own stop notice (measured ~0.8s later). Counting two empty
+    // replies instead was too eager: it braked mid-push, visibly.
+    nlEmptyMs += dtMs;
+    if (nlEmptyMs >= NL_RELEASE_MS) { nl.x = nl.y = nl.z = nl.rx = nl.rz = 0; nlAccDt = 0; }
+    return;
+  }
+  nlEmptyMs = 0;
+  const k = 1000 / Math.max(5, nlAccDt);
+  const clamp1 = v => Math.max(-1, Math.min(1, v));
+  nl.x = clamp1(nlAcc.x * k); nl.y = clamp1(nlAcc.y * k); nl.z = clamp1(nlAcc.z * k);
+  nl.rx = clamp1(nlAcc.rx * k); nl.rz = clamp1(nlAcc.rz * k);
+  nlAcc.x = nlAcc.y = nlAcc.z = nlAcc.rx = nlAcc.rz = nlAcc.n = 0;
+  nlAccDt = 0;
 }
 
 function nlStop() {
   nl.moving = false;
   nl.x = nl.y = nl.z = nl.rx = nl.rz = 0;
+  nlAcc.x = nlAcc.y = nlAcc.z = nlAcc.rx = nlAcc.rz = nlAcc.n = 0;
+  nlAccDt = 0;
+  nlPrevSent = 0;
+  nlEmptyMs = 0;
+  // Forget any request still in flight: if its reply never comes (the
+  // driver drops it when motion ends), waiting on it would block every
+  // later stroke -- a second push simply did nothing.
+  nlPending = false;
+  nlReqId++;
   nlMat = NL_START();
-  nlLastSet = 0;
 }
 
 const nlClient = {
@@ -2245,14 +2328,34 @@ const nlClient = {
     nlStop();
     updateInputSources();
   },
-  onStartMotion() { nl.moving = true; nlLastSet = 0; wake(); },
+  onStartMotion() { nlStop(); nl.moving = true; wake(); },
   onStopMotion: nlStop,
 };
 
 // Called once per frame from tick() while the driver reports motion.
 function nlFrame() {
   if (!nl.ready || !nl.moving) return;
-  nlMouse.update3dcontroller({ frame: { time: performance.now() } }).catch(() => nlStop());
+  const now = performance.now();
+  if (nlPending && now - nlPendingAt < NL_REPLY_TIMEOUT_MS) return;
+  // Giving up on a reply: keep the frame time it covered, so any steps it
+  // still produces are divided by the right amount.
+  if (nlPending) nlAccDt += nlLastDt;
+  // The first request of a stroke has nothing to measure against (the
+  // driver compares with whatever frame time it saw last, possibly from the
+  // previous stroke), so its step is dropped.
+  const dt = nlPrevSent ? now - nlPrevSent : 0;
+  nlPrevSent = now;
+  nlLastDt = dt;
+  nlPending = true;
+  nlPendingAt = now;
+  const id = ++nlReqId;
+  nlMouse.update3dcontroller({ frame: { time: now } }).then(() => {
+    if (id !== nlReqId) return;   // superseded or the stroke ended
+    nlPending = false;
+    if (!nl.moving) return;
+    if (dt === 0) { nlAcc.x = nlAcc.y = nlAcc.z = nlAcc.rx = nlAcc.rz = nlAcc.n = 0; return; }
+    nlOnReply(dt);
+  }, () => { if (id === nlReqId) nlStop(); });
 }
 
 // Only worth trying where the proxy can exist (HTTPS or localhost pages, a
@@ -2333,6 +2436,10 @@ setInterval(() => {
 let lastHeightSampleTime = 0;
 
 const GROUND_CLEARANCE = 15;     // m: closest the camera may get to the ground
+let cruiseHeld = 0;               // s the stick has been held off-centre
+const MOTION_GRACE_MS = 1500;     // quality controller holds off this long after a move starts
+let motionStartAt = -Infinity;
+let wasMoving = false;
 const scratchCarto = new Cesium.Cartographic();
 function tick() {
   const now = performance.now();
@@ -2452,11 +2559,16 @@ function tick() {
   // how high up we are.
   const worldRight = Cesium.Cartesian3.normalize(
     Cesium.Cartesian3.cross(horiz, zenith, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+  // Cruise boost: time spent holding a translation, past a 1s grace period,
+  // ramps the speed multiplier up over 3s. Any release starts it over.
+  if (Math.hypot(tgt.x, tgt.y, tgt.z) > 0.12) cruiseHeld += rawDt;
+  else cruiseHeld = 0;
+  const cruiseFactor = 1 + (settings.cruiseBoost - 1) * Cesium.Math.clamp((cruiseHeld - 1) / 3, 0, 1);
   if (smIn.x || smIn.y || smIn.z) {
     // heightAboveGround computed once at the top of tick() (not sea-level
     // altitude) -- matters near mountains, e.g. hovering just above Fuji's
     // ~3776m peak should feel like being near the ground and slow down.
-    const speed = settings.moveSpeed + heightAboveGround * settings.altFactor;
+    const speed = (settings.moveSpeed + heightAboveGround * settings.relSpeed) * cruiseFactor;
     const delta = new Cesium.Cartesian3();
     Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(worldRight, smIn.x * speed * dt, new Cesium.Cartesian3()), delta);
     Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(zenith, -smIn.z * speed * dt, new Cesium.Cartesian3()), delta);
@@ -2475,7 +2587,7 @@ function tick() {
 
   cam.setView({ orientation: { direction, up } });
 
-  const curSpeed = settings.moveSpeed + heightAboveGround * settings.altFactor;
+  const curSpeed = (settings.moveSpeed + heightAboveGround * settings.relSpeed) * cruiseFactor;
 
   // FPS (smoothed) tells us if rendering itself is the bottleneck; pending
   // tile requests tell us if we're instead waiting on network/tile loading.
@@ -2503,8 +2615,22 @@ function tick() {
   idleMs = moving ? 0 : idleMs + dt * 1000;
   const parked = idleMs > 350;
 
-  if (qualitySettle > 0) {
-    qualitySettle--;
+  // The first second of a move is the worst moment to judge framerate: the
+  // first frame back carries the idle gap, and tiles for the new view are
+  // all arriving at once. The controller used to read that as overload and
+  // cut the resolution half a second in -- and reallocating the framebuffer
+  // is itself a visible stall, which is the hitch felt about 1s after
+  // starting to move. Start each move from a clean slate and give it 1.5s.
+  if (moving && !wasMoving) {
+    motionStartAt = now;
+    fpsSmoothed = Math.max(fpsSmoothed, fpsGood());
+    slowFrameStreak = 0;
+  }
+  wasMoving = moving;
+  const inMotionGrace = now - motionStartAt < MOTION_GRACE_MS;
+
+  if (qualitySettle > 0 || inMotionGrace) {
+    if (qualitySettle > 0) qualitySettle--;
   } else {
     // Asymmetric smoothing: react fast to a drop, slowly to a recovery. A
     // symmetric average hides short stalls behind the good frames either
@@ -2546,7 +2672,7 @@ function tick() {
     ? settings.terrainDetail * 2 : settings.terrainDetail;
   if (currentTerrainSSE < bestSSE) setTerrainSSE(bestSSE);
 
-  if (qualitySettle === 0 && now - lastResScaleCheck > 500) {
+  if (qualitySettle === 0 && !inMotionGrace && now - lastResScaleCheck > 500) {
     lastResScaleCheck = now;
     const floor = fpsFloor(), good = fpsGood();
     const deficit = Cesium.Math.clamp((floor - fpsSmoothed) / floor, 0, 1);
