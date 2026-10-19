@@ -29,8 +29,15 @@
   /* Positioned with transform rather than left/top: moving a label then
      only touches compositing, not layout, which matters once 100+ of them
      are being repositioned every frame. */
+  /* v0.3.4: and each label is its own compositor layer, with every
+     per-frame change (position, leader length, text offset, fade) expressed
+     as transform or opacity. Measured with 50 labels on screen and no tiles
+     loading: 25fps with labels, 37fps without -- the text was being
+     re-rasterised every frame because leader height and text offset were
+     layout properties. Now a label is painted once and only moved. */
   .peak-label {
     position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 5; pointer-events: none;
+    will-change: transform, opacity;
     font-family: sans-serif; color: #fff; text-shadow: 0 0 4px #000, 0 0 3px #000;
   }
   /* Slanted text, pivoting on the top of the leader line. Rotating the names
@@ -39,8 +46,9 @@
      couple of dozen pixels apart can both stay legible instead of one
      having to be dropped. */
   .peak-label .rot {
-    position: absolute; left: 0; display: block; white-space: nowrap;
+    position: absolute; left: 0; bottom: 0; display: block; white-space: nowrap;
     transform-origin: 0 100%; transform: rotate(-45deg);
+    will-change: transform;
   }
   /* Every label leans the same way. Mirroring the ones near the right edge
      was tried and dropped: the two directions crossed over each other, and
@@ -51,9 +59,11 @@
      nearby-peaks panel, where there's room to say it plainly. */
   .peak-label .name { font-size: 13px; font-weight: bold; }
   .peak-label .dist { font-size: 10px; opacity: 0.85; margin-left: 4px; }
+  /* A 1px line stretched with scaleY from its bottom end. */
   .peak-label .line {
-    position: absolute; left: 0; bottom: 0; width: 1px;
+    position: absolute; left: 0; bottom: 0; width: 1px; height: 1px;
     background: rgba(255,255,255,0.8);
+    transform-origin: 50% 100%; will-change: transform;
   }
   .peak-label .dot {
     position: absolute; left: -4px; bottom: -4px;
@@ -1491,7 +1501,10 @@ function updatePeakLabels() {
     peak.el.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`;
     // Text writes are the expensive kind (they re-shape the glyphs), so only
     // when the shown value actually changes.
-    const distText = `${(distance / 1000).toFixed(1)} km / ${peak.elev} m`;
+    // Tenths of a km only matter close in; further out whole km are plenty,
+    // and every change of this text is a re-raster of the label.
+    const km = distance / 1000;
+    const distText = `${km < 20 ? km.toFixed(1) : Math.round(km)} km / ${peak.elev} m`;
     if (peak.lastDist !== distText) {
       peak.elDist.textContent = distText;
       peak.lastDist = distText;
@@ -1507,10 +1520,11 @@ function updatePeakLabels() {
     }
     // Leader line runs from the summit up to the shared row; the slanted
     // text then takes off from the top of that line.
+    // Both as transforms, so changing them never repaints the text.
     const lineH = Math.round(Math.max(LABEL_MIN_LINE, y - rowY));
     if (peak.lastLineH !== lineH) {
-      peak.elLine.style.height = lineH + 'px';
-      peak.elRot.style.bottom = lineH + 'px';
+      peak.elLine.style.transform = `scaleY(${lineH})`;
+      peak.elRot.style.transform = `translateY(${-lineH}px) rotate(-45deg)`;
       peak.lastLineH = lineH;
     }
   }
