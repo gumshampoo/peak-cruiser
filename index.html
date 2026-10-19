@@ -238,12 +238,6 @@
   </div>
   <div class="row">
     <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
-      <input type="checkbox" id="c_coarseWhileMoving" style="width:auto;">
-      <span>移動中は地形を粗くして軽くする</span>
-    </label>
-  </div>
-  <div class="row">
-    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
       <input type="checkbox" id="c_uncapWhileFlying" style="width:auto;">
       <span>飛行中は FPS 上限を外す (反応優先)</span>
     </label>
@@ -302,12 +296,12 @@
     <input type="range" id="s_deadzone" min="0" max="0.5" step="0.01">
   </div>
   <div class="row">
-    <label><span>止まっている時の解像度</span><span id="v_maxResolutionScale"></span></label>
+    <label><span>解像度の上限 (自動調整)</span><span id="v_maxResolutionScale"></span></label>
     <input type="range" id="s_maxResolutionScale" min="0.15" max="1.0" step="0.05">
   </div>
   <div class="row">
-    <label><span>飛行中の解像度</span><span id="v_flyResolutionScale"></span></label>
-    <input type="range" id="s_flyResolutionScale" min="0.2" max="1.0" step="0.05">
+    <label><span>解像度の下限 (自動調整)</span><span id="v_resolutionFloor"></span></label>
+    <input type="range" id="s_resolutionFloor" min="0.2" max="1.0" step="0.05">
   </div>
   <div class="row">
     <label><span>ミニマップ拡大率</span><span id="v_minimapZoom"></span></label>
@@ -333,7 +327,7 @@
     <input type="range" id="s_fpsCap" min="0" max="60" step="5">
   </div>
   <div class="row">
-    <label><span>飛行中の目標FPS (地形の細かさで調整)</span><span id="v_flyTargetFps"></span></label>
+    <label><span>飛行中の目標FPS</span><span id="v_flyTargetFps"></span></label>
     <input type="range" id="s_flyTargetFps" min="20" max="60" step="5">
   </div>
   <div class="row">
@@ -1593,7 +1587,7 @@ const DEFAULTS = {
   rotSpeed: 1.2,      // rad/s at full deflection
   deadzone: 0.06,
   maxResolutionScale: 0.65,  // ceiling for the adaptive resolution scaler below
-  flyResolutionScale: 0.6,   // resolution while flying (fixed: changing it stalls ~250ms)
+  resolutionFloor: 0.4,      // lowest the automatic resolution may go
   minimapZoom: 8,            // web-mercator zoom level of the minimap
   terrainDetail: 1.0,        // best terrain screen-space error (smaller = finer)
   labelFarOpacity: 0.3,      // opacity of the most distant labels (0 = fade out)
@@ -1610,7 +1604,6 @@ const DEFAULTS = {
   flyTargetFps: 45,          // framerate to hold while flying, paid for in resolution
   // ---- v0.3 ----
   skyAtmosphere: false,      // gradient sky with atmospheric scattering (GPU cost)
-  coarseWhileMoving: true,   // halve terrain detail while flying, restore when parked
   uncapWhileFlying: true,    // lift the FPS cap while moving, for the quickest response
   antiAlias: false,          // FXAA pass
   peakSet: '1500',           // 'meizan' | '1500' | '1000' | 'all'
@@ -1623,9 +1616,9 @@ const DEFAULTS = {
 // writes ordinary settings, so everything stays individually adjustable
 // afterwards.
 const QUALITY_PRESETS = {
-  light:    { maxResolutionScale: 0.5,  flyResolutionScale: 0.4, terrainDetail: 2.0, fpsCap: 24, skyAtmosphere: false, antiAlias: false, visibilityKm: 150 },
-  standard: { maxResolutionScale: 0.75, flyResolutionScale: 0.6, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: false, antiAlias: false, visibilityKm: 200 },
-  high:     { maxResolutionScale: 1.0,  flyResolutionScale: 0.8, terrainDetail: 1.0, fpsCap: 60, skyAtmosphere: true,  antiAlias: true,  visibilityKm: 250 },
+  light:    { maxResolutionScale: 0.5,  resolutionFloor: 0.35, terrainDetail: 2.0, fpsCap: 24, skyAtmosphere: false, antiAlias: false, visibilityKm: 150 },
+  standard: { maxResolutionScale: 0.75, resolutionFloor: 0.45, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: false, antiAlias: false, visibilityKm: 200 },
+  high:     { maxResolutionScale: 1.0,  resolutionFloor: 0.6, terrainDetail: 1.0, fpsCap: 60, skyAtmosphere: true,  antiAlias: true,  visibilityKm: 250 },
 };
 let settings = { ...DEFAULTS };
 try {
@@ -1642,7 +1635,8 @@ try {
   delete settings.maxTileRequests;
   delete settings.altFactor;           // superseded by relSpeed (v0.3.2)
   delete settings.fogDensity;          // superseded by visibilityKm (v0.3.3)
-  delete settings.minResolutionScale;  // superseded by flyResolutionScale (v0.3.6)
+  delete settings.minResolutionScale;  // superseded by resolutionFloor
+  delete settings.flyResolutionScale;  // v0.3.6 only; resolution is no longer switched on move/stop
 } catch (e) { /* ignore corrupt storage */ }
 
 function saveSettings() {
@@ -1685,7 +1679,7 @@ const SLIDER_DEFS = [
   { key: 'rotSpeed',  slider: 's_rotSpeed',  value: 'v_rotSpeed',  fmt: v => v.toFixed(2) },
   { key: 'deadzone',  slider: 's_deadzone',  value: 'v_deadzone',  fmt: v => v.toFixed(2) },
   { key: 'maxResolutionScale', slider: 's_maxResolutionScale', value: 'v_maxResolutionScale', fmt: v => Math.round(v * 100) + '%' },
-  { key: 'flyResolutionScale', slider: 's_flyResolutionScale', value: 'v_flyResolutionScale', fmt: v => Math.round(v * 100) + '%' },
+  { key: 'resolutionFloor', slider: 's_resolutionFloor', value: 'v_resolutionFloor', fmt: v => Math.round(v * 100) + '%' },
   { key: 'minimapZoom', slider: 's_minimapZoom', value: 'v_minimapZoom', fmt: v => 'z' + v.toFixed(0) },
   { key: 'terrainDetail', slider: 's_terrainDetail', value: 'v_terrainDetail', fmt: v => v.toFixed(1) },
   { key: 'labelFarOpacity', slider: 's_labelFarOpacity', value: 'v_labelFarOpacity', fmt: v => Math.round(v * 100) + '%' },
@@ -1713,7 +1707,6 @@ function refreshSettingsUI() {
   document.getElementById('c_skyAtmosphere').checked = settings.skyAtmosphere;
   document.getElementById('c_antiAlias').checked = settings.antiAlias;
   document.getElementById('c_hideOccluded').checked = settings.hideOccluded;
-  document.getElementById('c_coarseWhileMoving').checked = settings.coarseWhileMoving;
   document.getElementById('c_uncapWhileFlying').checked = settings.uncapWhileFlying;
   document.getElementById('s_peakSet').value = settings.peakSet;
   document.getElementById('s_labelPriority').value = settings.labelPriority;
@@ -1944,7 +1937,7 @@ window.addEventListener('resize', () => { overlayDirty = true; });
 // The resolution sliders apply on the next park / next take-off; the tick
 // loop picks the right one. Nudge it so a parked view updates right away.
 document.getElementById('s_maxResolutionScale').addEventListener('input', () => wake());
-document.getElementById('s_flyResolutionScale').addEventListener('input', () => wake());
+document.getElementById('s_resolutionFloor').addEventListener('input', () => wake());
 document.getElementById('s_timeOfDay').addEventListener('input', applySunLighting);
 document.getElementById('s_fpsCap').addEventListener('input', applyFpsCap);
 document.getElementById('c_pauseWhenUnfocused').addEventListener('change', (e) => {
@@ -1993,7 +1986,6 @@ for (const [id, key, apply] of [
   ['c_skyAtmosphere', 'skyAtmosphere', applyRealism],
   ['c_antiAlias', 'antiAlias', applyRealism],
   ['c_hideOccluded', 'hideOccluded', () => { overlayDirty = true; }],
-  ['c_coarseWhileMoving', 'coarseWhileMoving', () => {}],
   ['c_uncapWhileFlying', 'uncapWhileFlying', applyFpsCap],
 ]) {
   document.getElementById(id).addEventListener('change', (e) => {
@@ -2558,7 +2550,10 @@ let lastHeightSampleTime = 0;
 const GROUND_CLEARANCE = 15;     // m: closest the camera may get to the ground
 let cruiseHeld = 0;               // s the stick has been held off-centre
 let wasMoving = false;
-let wasParked = true;
+let fpsSlow = 45;                 // slow framerate average, for resolution decisions
+let lowFor = 0, highFor = 0;      // ms the slow average has been well below / above target
+let lastResChangeAt = -Infinity;
+let lastRestEaseAt = 0;
 const scratchCarto = new Cesium.Cartographic();
 function tick() {
   const now = performance.now();
@@ -2736,59 +2731,75 @@ function tick() {
 
   const startedMoving = moving && !wasMoving;
   wasMoving = moving;
-  const justParked = parked && !wasParked;
-  wasParked = parked;
   const wantUncapped = moving && settings.uncapWhileFlying;
   if (wantUncapped !== flyingUncapped) { flyingUncapped = wantUncapped; applyFpsCap(); }
 
-  // ---- Quality policy (v0.3.6): framerate while flying, sharpness at rest.
+  // ---- Quality policy (v0.3.7): one picture, adapted gently.
   //
-  // Measured: every change of viewer.resolutionScale stalls 20-790ms (about
-  // 250ms on average) while Cesium rebuilds its framebuffers -- even a 3%
-  // nudge. So resolution is NEVER adjusted mid-flight: it switches once to
-  // the flying resolution as a move starts, and once to full resolution when
-  // the camera stops (a stall nobody sees, since nothing is moving).
+  // Measured in the foreground: a resolution change stalls 110-360ms
+  // (median ~190ms) while Cesium rebuilds every framebuffer, however small
+  // the change -- a normal frame takes 1-2ms. So resolution can't be
+  // steered continuously, and switching it on every move/stop (v0.3.6) made
+  // a visible lurch twice per flight. Now:
   //
-  // The framerate is held continuously with terrain detail instead, which
-  // costs nothing to change: every 200ms the screen-space error is nudged by
-  // at most 15% towards whatever gets settings.flyTargetFps, within a band
-  // that leaves it alone when close enough (no endless wobble).
+  // - Terrain detail, which costs nothing to change, does the continuous
+  //   work: every 200ms of flight it's nudged (at most +-15%) towards
+  //   whatever holds settings.flyTargetFps; at rest it eases back towards
+  //   the finest setting a little at a time rather than snapping.
+  // - Resolution is a single value for flying and resting alike, moved
+  //   rarely: only when the flying framerate has been well off target for a
+  //   sustained stretch, by ~10%, then left alone for a while. After a few
+  //   flights it settles where this machine can hold the target and stays.
   if (startedMoving) {
     fpsSmoothed = settings.flyTargetFps;
+    fpsSlow = settings.flyTargetFps;
     lastResScaleCheck = now;
-    setResolutionScale(Math.min(settings.flyResolutionScale, settings.maxResolutionScale));
-    if (settings.coarseWhileMoving) setTerrainSSE(Math.max(currentTerrainSSE, settings.terrainDetail * 2));
-  }
-  if (justParked) {
-    setResolutionScale(settings.maxResolutionScale);
-    setTerrainSSE(settings.terrainDetail);
   }
 
   if (qualitySettle > 0) {
     qualitySettle--;      // frames right after a resolution change are not representative
   } else if (!parked) {
     fpsSmoothed += (instFps - fpsSmoothed) * 0.25;
+    fpsSlow += (instFps - fpsSlow) * 0.03;          // ~3s average, for resolution decisions
   }
 
   // Only judge framerate the user is actually seeing: an unfocused window
   // may be throttled by the browser regardless of load.
   if (!parked && qualitySettle === 0 && windowFocused && now - lastResScaleCheck > 200) {
     lastResScaleCheck = now;
-    const ratio = fpsSmoothed / settings.flyTargetFps;
+    const target = settings.flyTargetFps;
+    const ratio = fpsSmoothed / target;
     if (ratio < 0.95) {
-      // Short of the target: coarser. Tile count goes roughly with 1/SSE^2,
-      // so the square root of the shortfall is the proportionate step.
+      // Tile count goes roughly with 1/SSE^2, so the square root of the
+      // shortfall is the proportionate step.
       setTerrainSSE(Math.min(TERRAIN_SSE_WORST, currentTerrainSSE * Math.min(1.15, 1 / Math.sqrt(ratio))));
     } else if (ratio > 1.1) {
       setTerrainSSE(Math.max(settings.terrainDetail, currentTerrainSSE * 0.93));
     }
+
+    // Resolution: sustained shortfall or headroom only, then a cooldown.
+    const slowRatio = fpsSlow / target;
+    lowFor = slowRatio < 0.8 ? lowFor + 200 : 0;
+    highFor = slowRatio > 1.25 ? highFor + 200 : 0;
+    if (now - lastResChangeAt > 8000) {
+      const floor = Math.min(settings.resolutionFloor, settings.maxResolutionScale);
+      if (lowFor >= 4000 && currentResolutionScale > floor + 1e-3) {
+        setResolutionScale(Math.max(floor, currentResolutionScale * 0.9));
+        lastResChangeAt = now; lowFor = 0; fpsSlow = target * 0.9;
+      } else if (highFor >= 6000 && currentResolutionScale < settings.maxResolutionScale - 1e-3) {
+        setResolutionScale(Math.min(settings.maxResolutionScale, currentResolutionScale * 1.08));
+        lastResChangeAt = now; highFor = 0; fpsSlow = target;
+      }
+    }
   }
-  // At rest: always the best the settings allow (also covers a settings
-  // change made while parked).
-  if (parked) {
-    if (Math.abs(currentResolutionScale - settings.maxResolutionScale) > 1e-4) setResolutionScale(settings.maxResolutionScale);
-    if (currentTerrainSSE > settings.terrainDetail + 1e-4) setTerrainSSE(settings.terrainDetail);
+  // At rest: let terrain detail drift back to the finest setting gradually,
+  // so stopping doesn't make the ground visibly pop.
+  if (parked && currentTerrainSSE > settings.terrainDetail + 1e-4 && now - lastRestEaseAt > 150) {
+    lastRestEaseAt = now;
+    setTerrainSSE(Math.max(settings.terrainDetail, currentTerrainSSE * 0.85));
   }
+  // The resolution ceiling slider applies right away (one change, on purpose).
+  if (currentResolutionScale > settings.maxResolutionScale + 1e-4) setResolutionScale(settings.maxResolutionScale);
   // The readouts change every frame but nobody reads numbers at 30Hz, and
   // each write re-lays-out the panel. Four times a second is plenty.
   if (now - lastHudUpdate > 250) {
@@ -2842,7 +2853,6 @@ function tick() {
   // Everything settled? Then stop the loop until something wakes it.
   if (idleMs > SLEEP_AFTER_MS && !overlayDirty && !minimapDirty && !nl.moving &&
       keysDown.size === 0 && !pad.x && !pad.y && !pad.z && !pad.rx && !pad.rz &&
-      currentResolutionScale >= settings.maxResolutionScale - 1e-4 &&
       currentTerrainSSE <= settings.terrainDetail + 1e-4 &&
       !sceneHasPendingWork()) {
     sleepNow();
