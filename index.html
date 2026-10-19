@@ -65,11 +65,8 @@
     background: rgba(255,255,255,0.8);
     transform-origin: 50% 100%; will-change: transform;
   }
-  .peak-label .dot {
-    position: absolute; left: -4px; bottom: -4px;
-    width: 6px; height: 6px; border-radius: 50%; background: #fff;
-    border: 1px solid rgba(0,0,0,0.75);
-  }
+  /* No dot on the summit (v0.3.6): the leader line already ends there, and
+     the dots read as clutter on a busy skyline. */
 
   #settingsBtn {
     position: absolute; top: 10px; right: 10px; z-index: 10;
@@ -262,6 +259,14 @@
     </select>
   </div>
   <div class="row">
+    <label><span>重なったときに優先するラベル</span></label>
+    <select id="s_labelPriority" style="width:100%; padding:4px;">
+      <option value="nearHigh">近くて高い山</option>
+      <option value="near">近い山</option>
+      <option value="famous">有名な山 (百名山→二百名山→三百名山)</option>
+    </select>
+  </div>
+  <div class="row">
     <label><span>ラベルの最大数</span><span id="v_maxLabels"></span></label>
     <input type="range" id="s_maxLabels" min="5" max="150" step="5">
   </div>
@@ -297,12 +302,12 @@
     <input type="range" id="s_deadzone" min="0" max="0.5" step="0.01">
   </div>
   <div class="row">
-    <label><span>画質上限(解像度)</span><span id="v_maxResolutionScale"></span></label>
+    <label><span>止まっている時の解像度</span><span id="v_maxResolutionScale"></span></label>
     <input type="range" id="s_maxResolutionScale" min="0.15" max="1.0" step="0.05">
   </div>
   <div class="row">
-    <label><span>画質下限(解像度)</span><span id="v_minResolutionScale"></span></label>
-    <input type="range" id="s_minResolutionScale" min="0.1" max="1.0" step="0.02">
+    <label><span>飛行中の解像度</span><span id="v_flyResolutionScale"></span></label>
+    <input type="range" id="s_flyResolutionScale" min="0.2" max="1.0" step="0.05">
   </div>
   <div class="row">
     <label><span>ミニマップ拡大率</span><span id="v_minimapZoom"></span></label>
@@ -326,6 +331,10 @@
   <div class="row">
     <label><span>FPS上限</span><span id="v_fpsCap"></span></label>
     <input type="range" id="s_fpsCap" min="0" max="60" step="5">
+  </div>
+  <div class="row">
+    <label><span>飛行中の目標FPS (地形の細かさで調整)</span><span id="v_flyTargetFps"></span></label>
+    <input type="range" id="s_flyTargetFps" min="20" max="60" step="5">
   </div>
   <div class="row">
     <label><span>操作の慣性</span><span id="v_inputSmoothing"></span></label>
@@ -1411,11 +1420,22 @@ function updatePeakLabels() {
     inCone.push({ peak, distance, x: 0, y: 0 });
   }
 
-  // Greedy placement by fame first: when two names would collide, the more
-  // celebrated peak keeps its label -- 百名山, 二百名山, 三百名山, then the
-  // rest. Distance only breaks ties within the same list, where the nearer
-  // summit wins because it's the one you can actually pick out.
-  inCone.sort((a, b) => a.peak.rank - b.peak.rank || a.distance - b.distance);
+  // Who wins when two names would collide (v0.3.6):
+  // - 'nearHigh' (default): elevation / (km + 10). Near peaks win, as they
+  //   are the ones actually in front of you, but a big summit further off
+  //   still beats a small hill close by: 1000m at 5km and 2000m at 20km
+  //   both score ~67, 3000m at 50km scores 50.
+  // - 'near': nearest first, whatever its height.
+  // - 'famous': the old order -- 百名山, 二百名山, 三百名山, then the rest,
+  //   nearest first within each.
+  if (settings.labelPriority === 'famous') {
+    inCone.sort((a, b) => a.peak.rank - b.peak.rank || a.distance - b.distance);
+  } else if (settings.labelPriority === 'near') {
+    inCone.sort((a, b) => a.distance - b.distance);
+  } else {
+    for (const c of inCone) c.score = c.peak.elev / (c.distance / 1000 + 10);
+    inCone.sort((a, b) => b.score - a.score);
+  }
 
   const maxLabels = settings.maxLabels;
   const minDx = settings.labelSpacing;
@@ -1487,7 +1507,7 @@ function updatePeakLabels() {
       const el = document.createElement('div');
       el.className = 'peak-label';
       el.innerHTML = `<span class="rot"><span class="name"></span><span class="dist"></span></span>`
-        + `<span class="line"></span><span class="dot"></span>`;
+        + `<span class="line"></span>`;
       peakLabelsEl.appendChild(el);
       peak.el = el;
       // Cache the child refs once. Re-running querySelector for all four
@@ -1573,8 +1593,7 @@ const DEFAULTS = {
   rotSpeed: 1.2,      // rad/s at full deflection
   deadzone: 0.06,
   maxResolutionScale: 0.65,  // ceiling for the adaptive resolution scaler below
-  minResolutionScale: 0.12,  // floor for the adaptive scaler -- deliberately
-                             // very low, so holding 30fps is always possible
+  flyResolutionScale: 0.6,   // resolution while flying (fixed: changing it stalls ~250ms)
   minimapZoom: 8,            // web-mercator zoom level of the minimap
   terrainDetail: 1.0,        // best terrain screen-space error (smaller = finer)
   labelFarOpacity: 0.3,      // opacity of the most distant labels (0 = fade out)
@@ -1588,6 +1607,7 @@ const DEFAULTS = {
   pauseWhenUnfocused: true,  // stop rendering entirely in the background
   tileRequests: 24,          // concurrent tile downloads
   inputSmoothing: 0.12,      // seconds of lag on stick input (0 = raw)
+  flyTargetFps: 45,          // framerate to hold while flying, paid for in resolution
   // ---- v0.3 ----
   skyAtmosphere: false,      // gradient sky with atmospheric scattering (GPU cost)
   coarseWhileMoving: true,   // halve terrain detail while flying, restore when parked
@@ -1597,14 +1617,15 @@ const DEFAULTS = {
   maxLabels: 50,             // clutter ceiling for names on screen at once
   labelSpacing: 26,          // px: min horizontal gap between label anchors
   hideOccluded: true,        // drop labels for peaks hidden behind a ridge
+  labelPriority: 'nearHigh', // 'nearHigh' | 'near' | 'famous': which label wins a collision
 };
 // "Make it lighter" / "make it look real" in one move. Each preset only
 // writes ordinary settings, so everything stays individually adjustable
 // afterwards.
 const QUALITY_PRESETS = {
-  light:    { maxResolutionScale: 0.5,  terrainDetail: 2.0, fpsCap: 24, skyAtmosphere: false, antiAlias: false, visibilityKm: 150 },
-  standard: { maxResolutionScale: 0.65, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: false, antiAlias: false, visibilityKm: 200 },
-  high:     { maxResolutionScale: 1.0,  terrainDetail: 1.0, fpsCap: 60, skyAtmosphere: true,  antiAlias: true,  visibilityKm: 250 },
+  light:    { maxResolutionScale: 0.5,  flyResolutionScale: 0.4, terrainDetail: 2.0, fpsCap: 24, skyAtmosphere: false, antiAlias: false, visibilityKm: 150 },
+  standard: { maxResolutionScale: 0.75, flyResolutionScale: 0.6, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: false, antiAlias: false, visibilityKm: 200 },
+  high:     { maxResolutionScale: 1.0,  flyResolutionScale: 0.8, terrainDetail: 1.0, fpsCap: 60, skyAtmosphere: true,  antiAlias: true,  visibilityKm: 250 },
 };
 let settings = { ...DEFAULTS };
 try {
@@ -1621,6 +1642,7 @@ try {
   delete settings.maxTileRequests;
   delete settings.altFactor;           // superseded by relSpeed (v0.3.2)
   delete settings.fogDensity;          // superseded by visibilityKm (v0.3.3)
+  delete settings.minResolutionScale;  // superseded by flyResolutionScale (v0.3.6)
 } catch (e) { /* ignore corrupt storage */ }
 
 function saveSettings() {
@@ -1652,7 +1674,7 @@ viewer.resolutionScale = currentResolutionScale;
 // is an ERROR budget, so SMALLER = finer terrain: settings.terrainDetail is
 // the best (sharpest) we'll ask for, TERRAIN_SSE_WORST the coarsest we'll
 // fall back to when the framerate can't keep up.
-const TERRAIN_SSE_WORST = 12;
+const TERRAIN_SSE_WORST = 32;      // coarsest the flying controller will go
 let currentTerrainSSE = settings.terrainDetail;
 viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
 
@@ -1663,11 +1685,12 @@ const SLIDER_DEFS = [
   { key: 'rotSpeed',  slider: 's_rotSpeed',  value: 'v_rotSpeed',  fmt: v => v.toFixed(2) },
   { key: 'deadzone',  slider: 's_deadzone',  value: 'v_deadzone',  fmt: v => v.toFixed(2) },
   { key: 'maxResolutionScale', slider: 's_maxResolutionScale', value: 'v_maxResolutionScale', fmt: v => Math.round(v * 100) + '%' },
-  { key: 'minResolutionScale', slider: 's_minResolutionScale', value: 'v_minResolutionScale', fmt: v => Math.round(v * 100) + '%' },
+  { key: 'flyResolutionScale', slider: 's_flyResolutionScale', value: 'v_flyResolutionScale', fmt: v => Math.round(v * 100) + '%' },
   { key: 'minimapZoom', slider: 's_minimapZoom', value: 'v_minimapZoom', fmt: v => 'z' + v.toFixed(0) },
   { key: 'terrainDetail', slider: 's_terrainDetail', value: 'v_terrainDetail', fmt: v => v.toFixed(1) },
   { key: 'labelFarOpacity', slider: 's_labelFarOpacity', value: 'v_labelFarOpacity', fmt: v => Math.round(v * 100) + '%' },
   { key: 'fpsCap', slider: 's_fpsCap', value: 'v_fpsCap', fmt: v => v === 0 ? '無制限' : v.toFixed(0) + ' fps' },
+  { key: 'flyTargetFps', slider: 's_flyTargetFps', value: 'v_flyTargetFps', fmt: v => v.toFixed(0) + ' fps' },
   { key: 'inputSmoothing', slider: 's_inputSmoothing', value: 'v_inputSmoothing', fmt: v => v === 0 ? 'なし' : v.toFixed(2) + ' 秒' },
   { key: 'maxLabels', slider: 's_maxLabels', value: 'v_maxLabels', fmt: v => v.toFixed(0) + ' 個' },
   { key: 'labelSpacing', slider: 's_labelSpacing', value: 'v_labelSpacing', fmt: v => v.toFixed(0) + ' px' },
@@ -1693,6 +1716,7 @@ function refreshSettingsUI() {
   document.getElementById('c_coarseWhileMoving').checked = settings.coarseWhileMoving;
   document.getElementById('c_uncapWhileFlying').checked = settings.uncapWhileFlying;
   document.getElementById('s_peakSet').value = settings.peakSet;
+  document.getElementById('s_labelPriority').value = settings.labelPriority;
 }
 // Yes: rendering the rest of the world does cost. Looking at the horizon
 // throws a frustum thousands of km deep, and Cesium dutifully streams coarse
@@ -1867,7 +1891,7 @@ function wake() {
 // The Gamepad API can only be polled, so a sleeping app checks it slowly.
 let padWakeTimer = null;
 function pollPadWhileAsleep() {
-  const gp = [...navigator.getGamepads()].find(g => g && g.connected);
+  const gp = realGamepads()[0];
   if (!gp) return;
   if (gp.axes.some(v => Math.abs(v) > PAD_DEADZONE) || gp.buttons.some(b => b.pressed)) wake();
 }
@@ -1917,28 +1941,10 @@ for (const d of SLIDER_DEFS) {
   });
 }
 window.addEventListener('resize', () => { overlayDirty = true; });
-document.getElementById('s_maxResolutionScale').addEventListener('input', () => {
-  if (settings.minResolutionScale > settings.maxResolutionScale) {
-    settings.minResolutionScale = settings.maxResolutionScale;
-    saveSettings();
-    refreshSettingsUI();
-  }
-  if (currentResolutionScale > settings.maxResolutionScale) {
-    currentResolutionScale = settings.maxResolutionScale;
-    viewer.resolutionScale = currentResolutionScale;
-  }
-});
-document.getElementById('s_minResolutionScale').addEventListener('input', () => {
-  if (settings.maxResolutionScale < settings.minResolutionScale) {
-    settings.maxResolutionScale = settings.minResolutionScale;
-    saveSettings();
-    refreshSettingsUI();
-  }
-  if (currentResolutionScale < settings.minResolutionScale) {
-    currentResolutionScale = settings.minResolutionScale;
-    viewer.resolutionScale = currentResolutionScale;
-  }
-});
+// The resolution sliders apply on the next park / next take-off; the tick
+// loop picks the right one. Nudge it so a parked view updates right away.
+document.getElementById('s_maxResolutionScale').addEventListener('input', () => wake());
+document.getElementById('s_flyResolutionScale').addEventListener('input', () => wake());
 document.getElementById('s_timeOfDay').addEventListener('input', applySunLighting);
 document.getElementById('s_fpsCap').addEventListener('input', applyFpsCap);
 document.getElementById('c_pauseWhenUnfocused').addEventListener('change', (e) => {
@@ -1980,9 +1986,6 @@ document.getElementById('s_preset').addEventListener('change', (e) => {
   const preset = QUALITY_PRESETS[e.target.value];
   if (!preset) return;
   Object.assign(settings, preset);
-  if (settings.minResolutionScale > settings.maxResolutionScale) {
-    settings.minResolutionScale = settings.maxResolutionScale;
-  }
   applyAllSettings();
   e.target.value = '';  // a one-shot action, not a mode
 });
@@ -1999,6 +2002,11 @@ for (const [id, key, apply] of [
     apply();
   });
 }
+document.getElementById('s_labelPriority').addEventListener('change', (e) => {
+  settings.labelPriority = e.target.value;
+  saveSettings();
+  overlayDirty = true;
+});
 document.getElementById('s_peakSet').addEventListener('change', (e) => {
   settings.peakSet = e.target.value;
   saveSettings();
@@ -2084,7 +2092,7 @@ async function openSpaceMouse(device) {
   } catch (e) {
     // The usual cause: 3Dconnexion's own driver (3DxWare) holds the device.
     // That's fine when the driver route below is connected.
-    if (!nl.ready) setStatus('ドライバ経由で接続を待っています… (3DxWare が必要)', false);
+    if (!nl.ready) setStatus('3DxWare が使用中です (start.command で起動すると直接接続)', false);
     return;
   }
   if (hidDevice && hidDevice !== device) hidDevice.removeEventListener('inputreport', onHidReport);
@@ -2133,11 +2141,31 @@ if ('hid' in navigator) {
   });
 }
 
+// ---- Direct mode under start.command (v0.3.6) ----
+// server.py pauses 3Dconnexion's driver for as long as it runs, so the
+// SpaceMouse is reached directly over WebHID (noticeably quicker than the
+// driver route). The page only needs to know whether that's the case, so it
+// doesn't keep trying to reach a driver that has been stopped on purpose.
+// (Switching the driver on and off with window focus was tried first and
+// dropped: restarting part of 3DxWare left other apps without a SpaceMouse.)
+let directSession = false;
+const driverProbe = fetch('/api/driver', { cache: 'no-store' })
+  .then(r => (r.ok ? r.json() : null))
+  .then(j => { directSession = !!(j && j.mode === 'direct'); })
+  .catch(() => { /* plain static hosting: no server.py */ });
+
 // Gamepad (Xbox / PlayStation / Switch Pro, anything the browser maps to the
 // "standard" layout). Left stick moves, right stick looks, triggers climb
 // and descend, A levels the view. Polled once per frame from tick().
 const PAD_DEADZONE = 0.12;
 let padConnected = false;
+// Chrome also exposes a SpaceMouse through the Gamepad API (it counts any
+// "multi-axis controller"), which fed the same hand movement in a second
+// time on top of the real SpaceMouse route. Those are never a gamepad here.
+const NOT_A_GAMEPAD = /3dconnexion|spacenavigator|spacemouse|space mouse|vendor: 046d product: c6|vendor: 256f/i;
+function realGamepads() {
+  return [...navigator.getGamepads()].filter(g => g && g.connected && !NOT_A_GAMEPAD.test(g.id));
+}
 function padAxis(v) {
   if (Math.abs(v) < PAD_DEADZONE) return 0;
   // Rescale past the deadzone and square it: fine control near the centre,
@@ -2149,7 +2177,7 @@ const pad = { x: 0, y: 0, z: 0, rx: 0, rz: 0, a: false };
 function pollGamepad() {
   pad.x = pad.y = pad.z = pad.rx = pad.rz = 0;
   if (!padConnected) return;
-  const gp = [...navigator.getGamepads()].find(g => g && g.connected);
+  const gp = realGamepads()[0];
   if (!gp) return;
   const ax = gp.axes;
   pad.x = padAxis(ax[0] || 0);
@@ -2162,9 +2190,9 @@ function pollGamepad() {
   if (a && !pad.a) levelRequested = true;
   pad.a = a;
 }
-window.addEventListener('gamepadconnected', () => { padConnected = true; updateInputSources(); });
+window.addEventListener('gamepadconnected', () => { padConnected = realGamepads().length > 0; updateInputSources(); });
 window.addEventListener('gamepaddisconnected', () => {
-  padConnected = [...navigator.getGamepads()].some(g => g && g.connected);
+  padConnected = realGamepads().length > 0;
   updateInputSources();
 });
 
@@ -2197,8 +2225,8 @@ function pollKeyboard() {
 
 function updateInputSources() {
   const parts = ['キーボード'];
-  if (hidDevice) parts.unshift('SpaceMouse');
-  if (nl.ready) parts.unshift('SpaceMouse (ドライバ経由)');
+  if (hidDevice) parts.unshift('SpaceMouse (直接)');
+  else if (nl.ready) parts.unshift('SpaceMouse (ドライバ経由)');
   if (padConnected) parts.push('ゲームパッド');
   document.getElementById('inputSources').textContent = parts.join(' + ');
 }
@@ -2380,6 +2408,10 @@ const nlClient = {
     nl.ready = false;
     nlStop();
     updateInputSources();
+    // The proxy goes away whenever 3DxWare restarts (an update, a login, a
+    // manual restart). Keep trying to come back rather than staying dead
+    // until the page is reloaded.
+    nlScheduleReconnect();
   },
   onStartMotion() { nlStop(); nl.moving = true; wake(); nlPump(); },
   onStopMotion: nlStop,
@@ -2444,16 +2476,27 @@ function nlFrame() {
 // Only worth trying where the proxy can exist (HTTPS or localhost pages, a
 // machine with 3DxWare). A missing proxy just means the library's query
 // fails quietly and WebHID stays the way in.
+let nlReconnectTimer = null;
+function nlConnect() {
+  if (typeof _3Dconnexion !== 'function' || directSession) return;
+  nlMouse = new _3Dconnexion(nlClient);
+  nlMouse.connect();
+  // connect() gives up quietly when nothing answers; check back and retry.
+  nlScheduleReconnect();
+}
+function nlScheduleReconnect() {
+  if (nlReconnectTimer !== null) return;
+  nlReconnectTimer = setTimeout(() => {
+    nlReconnectTimer = null;
+    if (!nl.ready) nlConnect();
+  }, 5000);
+}
 (function loadNavlib() {
   if (!window.isSecureContext) return;
   const s = document.createElement('script');
   s.src = NL_SCRIPT;
   s.crossOrigin = 'anonymous';
-  s.onload = () => {
-    if (typeof _3Dconnexion !== 'function') return;
-    nlMouse = new _3Dconnexion(nlClient);
-    nlMouse.connect();
-  };
+  s.onload = () => driverProbe.then(nlConnect);
   document.head.appendChild(s);
 })();
 
@@ -2461,12 +2504,6 @@ function nlFrame() {
 let lastTime = performance.now();
 let fpsSmoothed = 60;
 let lastResScaleCheck = performance.now();
-let slowFrameStreak = 0;
-// The framerate we defend, derived from whatever cap is in force. Defending
-// the cap itself is incoherent -- frames land exactly there, jitter dips
-// under, and the controller ends up treating its own pacing as overload.
-function fpsFloor() { return settings.fpsCap > 0 ? settings.fpsCap * 0.8 : 30; }
-function fpsGood()  { return settings.fpsCap > 0 ? settings.fpsCap * 0.95 : 40; }
 let qualitySettle = 0;   // frames to ignore after a resolution change
 let idleMs = 0;          // how long the camera has been sitting still
 // Last camera state the HUD overlays were drawn for, so they can be skipped
@@ -2478,7 +2515,7 @@ let overlayDirty = true;
 // Single place that changes resolutionScale, so the settle window can never
 // be forgotten at one of the call sites.
 function setResolutionScale(v) {
-  const next = Cesium.Math.clamp(v, settings.minResolutionScale, settings.maxResolutionScale);
+  const next = Cesium.Math.clamp(v, 0.1, 1);
   if (Math.abs(next - currentResolutionScale) < 1e-4) return;
   currentResolutionScale = next;
   viewer.resolutionScale = next;
@@ -2520,9 +2557,8 @@ let lastHeightSampleTime = 0;
 
 const GROUND_CLEARANCE = 15;     // m: closest the camera may get to the ground
 let cruiseHeld = 0;               // s the stick has been held off-centre
-const MOTION_GRACE_MS = 1500;     // quality controller holds off this long after a move starts
-let motionStartAt = -Infinity;
 let wasMoving = false;
+let wasParked = true;
 const scratchCarto = new Cesium.Cartographic();
 function tick() {
   const now = performance.now();
@@ -2698,99 +2734,60 @@ function tick() {
   idleMs = moving ? 0 : idleMs + dt * 1000;
   const parked = idleMs > 350;
 
-  // The first second of a move is the worst moment to judge framerate: the
-  // first frame back carries the idle gap, and tiles for the new view are
-  // all arriving at once. The controller used to read that as overload and
-  // cut the resolution half a second in -- and reallocating the framebuffer
-  // is itself a visible stall, which is the hitch felt about 1s after
-  // starting to move. Start each move from a clean slate and give it 1.5s.
-  if (moving && !wasMoving) {
-    motionStartAt = now;
-    fpsSmoothed = Math.max(fpsSmoothed, fpsGood());
-    slowFrameStreak = 0;
-  }
+  const startedMoving = moving && !wasMoving;
   wasMoving = moving;
+  const justParked = parked && !wasParked;
+  wasParked = parked;
   const wantUncapped = moving && settings.uncapWhileFlying;
   if (wantUncapped !== flyingUncapped) { flyingUncapped = wantUncapped; applyFpsCap(); }
-  const inMotionGrace = now - motionStartAt < MOTION_GRACE_MS;
 
-  if (qualitySettle > 0 || inMotionGrace) {
-    if (qualitySettle > 0) qualitySettle--;
-  } else {
-    // Asymmetric smoothing: react fast to a drop, slowly to a recovery. A
-    // symmetric average hides short stalls behind the good frames either
-    // side of them, which is exactly when we most want to have cut back.
-    fpsSmoothed += (instFps - fpsSmoothed) * (instFps < fpsSmoothed ? 0.4 : 0.05);
-
-    // Emergency path only. This used to fire on any frame under the target,
-    // which was self-defeating once a frame-rate cap existed: a capped 30fps
-    // lands frames AT 30, jitter puts many of them just under, and the
-    // controller read its own cap as the scene being too heavy and collapsed
-    // the resolution to minimum within a second. It now waits for frames
-    // that are genuinely crawling, and even then steps gently -- the
-    // half-second controller below does the ordinary work.
-    if (!parked && instFps < 12 && currentResolutionScale > settings.minResolutionScale) {
-      slowFrameStreak++;
-      if (slowFrameStreak >= 3) {
-        slowFrameStreak = 0;
-        setResolutionScale(currentResolutionScale - 0.08);
-      }
-    } else {
-      slowFrameStreak = 0;
-    }
+  // ---- Quality policy (v0.3.6): framerate while flying, sharpness at rest.
+  //
+  // Measured: every change of viewer.resolutionScale stalls 20-790ms (about
+  // 250ms on average) while Cesium rebuilds its framebuffers -- even a 3%
+  // nudge. So resolution is NEVER adjusted mid-flight: it switches once to
+  // the flying resolution as a move starts, and once to full resolution when
+  // the camera stops (a stall nobody sees, since nothing is moving).
+  //
+  // The framerate is held continuously with terrain detail instead, which
+  // costs nothing to change: every 200ms the screen-space error is nudged by
+  // at most 15% towards whatever gets settings.flyTargetFps, within a band
+  // that leaves it alone when close enough (no endless wobble).
+  if (startedMoving) {
+    fpsSmoothed = settings.flyTargetFps;
+    lastResScaleCheck = now;
+    setResolutionScale(Math.min(settings.flyResolutionScale, settings.maxResolutionScale));
+    if (settings.coarseWhileMoving) setTerrainSSE(Math.max(currentTerrainSSE, settings.terrainDetail * 2));
+  }
+  if (justParked) {
+    setResolutionScale(settings.maxResolutionScale);
+    setTerrainSSE(settings.terrainDetail);
   }
 
-  // Twice a second, trade quality for framerate or claim it back.
-  //
-  // Two rules matter here. First, the framerate we defend has to sit BELOW
-  // any cap we've imposed on ourselves -- defending the cap itself means
-  // fighting our own frame pacing forever. Second, terrain detail is spent
-  // before resolution: coarser ground is far less noticeable than a soft
-  // picture, so resolution is only touched once terrain has nothing left to
-  // give, or when the shortfall is bad enough that terrain alone won't fix
-  // it. That ordering is what keeps the image sharp at a merely-adequate
-  // framerate instead of collapsing to minimum at the first hiccup.
-  // Flying: the eye can't take in fine terrain detail at speed anyway, and
-  // half the detail is roughly a quarter of the tiles to fetch, build and
-  // draw. The parked branch below sharpens it back once the camera stops.
-  const bestSSE = (!parked && settings.coarseWhileMoving)
-    ? settings.terrainDetail * 2 : settings.terrainDetail;
-  if (currentTerrainSSE < bestSSE) setTerrainSSE(bestSSE);
+  if (qualitySettle > 0) {
+    qualitySettle--;      // frames right after a resolution change are not representative
+  } else if (!parked) {
+    fpsSmoothed += (instFps - fpsSmoothed) * 0.25;
+  }
 
-  if (qualitySettle === 0 && !inMotionGrace && now - lastResScaleCheck > 500) {
+  // Only judge framerate the user is actually seeing: an unfocused window
+  // may be throttled by the browser regardless of load.
+  if (!parked && qualitySettle === 0 && windowFocused && now - lastResScaleCheck > 200) {
     lastResScaleCheck = now;
-    const floor = fpsFloor(), good = fpsGood();
-    const deficit = Cesium.Math.clamp((floor - fpsSmoothed) / floor, 0, 1);
-    if (parked) {
-      // Parked: climb back to full quality unconditionally. Recovery used to
-      // be gated on reaching a target framerate, so on a machine that can't
-      // hit it even at minimum resolution the picture stayed pinned at its
-      // worst forever -- the harder the GPU struggled, the more permanent
-      // the degradation became. Standing still is precisely when framerate
-      // stops mattering, so nothing here is gated on it.
-      if (currentResolutionScale < settings.maxResolutionScale) {
-        setResolutionScale(currentResolutionScale + 0.05);
-      } else if (currentTerrainSSE > settings.terrainDetail) {
-        setTerrainSSE(Math.max(settings.terrainDetail, currentTerrainSSE - 0.5));
-      }
-    } else if (fpsSmoothed < floor) {
-      const terrainSpent = currentTerrainSSE >= TERRAIN_SSE_WORST;
-      if (!terrainSpent) {
-        setTerrainSSE(Math.min(TERRAIN_SSE_WORST, currentTerrainSSE + 0.5 + 2 * deficit));
-      }
-      // Resolution is the last resort: only once terrain is exhausted, or
-      // when we're missing by a wide margin and coarsening ground alone
-      // clearly isn't going to close the gap.
-      if ((terrainSpent || deficit > 0.35) && currentResolutionScale > settings.minResolutionScale) {
-        setResolutionScale(currentResolutionScale - (0.03 + 0.07 * deficit));
-      }
-    } else if (fpsSmoothed > good) {
-      if (currentResolutionScale < settings.maxResolutionScale) {
-        setResolutionScale(currentResolutionScale + 0.05);
-      } else if (currentTerrainSSE > bestSSE) {
-        setTerrainSSE(Math.max(bestSSE, currentTerrainSSE - 0.5));
-      }
+    const ratio = fpsSmoothed / settings.flyTargetFps;
+    if (ratio < 0.95) {
+      // Short of the target: coarser. Tile count goes roughly with 1/SSE^2,
+      // so the square root of the shortfall is the proportionate step.
+      setTerrainSSE(Math.min(TERRAIN_SSE_WORST, currentTerrainSSE * Math.min(1.15, 1 / Math.sqrt(ratio))));
+    } else if (ratio > 1.1) {
+      setTerrainSSE(Math.max(settings.terrainDetail, currentTerrainSSE * 0.93));
     }
+  }
+  // At rest: always the best the settings allow (also covers a settings
+  // change made while parked).
+  if (parked) {
+    if (Math.abs(currentResolutionScale - settings.maxResolutionScale) > 1e-4) setResolutionScale(settings.maxResolutionScale);
+    if (currentTerrainSSE > settings.terrainDetail + 1e-4) setTerrainSSE(settings.terrainDetail);
   }
   // The readouts change every frame but nobody reads numbers at 30Hz, and
   // each write re-lays-out the panel. Four times a second is plenty.
