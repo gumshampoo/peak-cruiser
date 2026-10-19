@@ -245,6 +245,12 @@
       <span>移動中は地形を粗くして軽くする</span>
     </label>
   </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_uncapWhileFlying" style="width:auto;">
+      <span>飛行中は FPS 上限を外す (反応優先)</span>
+    </label>
+  </div>
   <hr style="border:none; border-top:1px solid rgba(255,255,255,0.2); margin:12px 0 10px;">
   <div class="row">
     <label><span>ラベルを付ける山</span></label>
@@ -1585,6 +1591,7 @@ const DEFAULTS = {
   // ---- v0.3 ----
   skyAtmosphere: false,      // gradient sky with atmospheric scattering (GPU cost)
   coarseWhileMoving: true,   // halve terrain detail while flying, restore when parked
+  uncapWhileFlying: true,    // lift the FPS cap while moving, for the quickest response
   antiAlias: false,          // FXAA pass
   peakSet: '1500',           // 'meizan' | '1500' | '1000' | 'all'
   maxLabels: 50,             // clutter ceiling for names on screen at once
@@ -1684,6 +1691,7 @@ function refreshSettingsUI() {
   document.getElementById('c_antiAlias').checked = settings.antiAlias;
   document.getElementById('c_hideOccluded').checked = settings.hideOccluded;
   document.getElementById('c_coarseWhileMoving').checked = settings.coarseWhileMoving;
+  document.getElementById('c_uncapWhileFlying').checked = settings.uncapWhileFlying;
   document.getElementById('s_peakSet').value = settings.peakSet;
 }
 // Yes: rendering the rest of the world does cost. Looking at the horizon
@@ -1760,8 +1768,15 @@ applyFog();
 // Cesium runs its OWN render loop; capping our tick() would leave the actual
 // rendering untouched. targetFrameRate is the lever that throttles the
 // renderer itself, and it is where nearly all the saving comes from.
+// v0.3.5: the cap is for being kind to the machine while the view is being
+// looked at, not while it's being flown. Whatever the cap, a frame can wait
+// up to 1/cap seconds before it's drawn -- 42ms at 24fps -- and that wait
+// sits directly between the hand and the screen. So while moving it's lifted
+// (unless switched off), and it comes back as soon as the camera stops.
+let flyingUncapped = false;
 function applyFpsCap() {
-  viewer.targetFrameRate = settings.fpsCap > 0 ? settings.fpsCap : undefined;
+  const cap = flyingUncapped ? 0 : settings.fpsCap;
+  viewer.targetFrameRate = cap > 0 ? cap : undefined;
 }
 applyFpsCap();
 
@@ -1976,6 +1991,7 @@ for (const [id, key, apply] of [
   ['c_antiAlias', 'antiAlias', applyRealism],
   ['c_hideOccluded', 'hideOccluded', () => { overlayDirty = true; }],
   ['c_coarseWhileMoving', 'coarseWhileMoving', () => {}],
+  ['c_uncapWhileFlying', 'uncapWhileFlying', applyFpsCap],
 ]) {
   document.getElementById(id).addEventListener('change', (e) => {
     settings[key] = e.target.checked;
@@ -2317,13 +2333,13 @@ function nlStop() {
   nl.x = nl.y = nl.z = nl.rx = nl.rz = 0;
   nlAcc.x = nlAcc.y = nlAcc.z = nlAcc.rx = nlAcc.rz = nlAcc.n = 0;
   nlAccDt = 0;
-  nlPrevSent = 0;
   nlEmptyMs = 0;
   // Forget any request still in flight: if its reply never comes (the
   // driver drops it when motion ends), waiting on it would block every
   // later stroke -- a second push simply did nothing.
   nlPending = false;
   nlReqId++;
+  if (nlPumpTimer !== null) { clearTimeout(nlPumpTimer); nlPumpTimer = null; }
   nlMat = NL_START();
 }
 
@@ -2365,22 +2381,32 @@ const nlClient = {
     nlStop();
     updateInputSources();
   },
-  onStartMotion() { nlStop(); nl.moving = true; wake(); },
+  onStartMotion() { nlStop(); nl.moving = true; wake(); nlPump(); },
   onStopMotion: nlStop,
 };
 
-// Called once per frame from tick() while the driver reports motion.
-function nlFrame() {
+// The exchange with the driver runs on its own loop, not once per rendered
+// frame (v0.3.5). Tied to rendering it inherited every slow frame: at
+// ~65ms a frame, with the stroke's first reply discarded, the camera only
+// started moving 120-330ms after the driver had already reported motion.
+// Now the next frame request goes out as soon as the previous reply lands
+// (at most every NL_PUMP_MS), the first one leaves the moment motion starts,
+// and tick() simply reads the latest stick values.
+const NL_PUMP_MS = 16;
+let nlPumpTimer = null;
+function nlPump() {
+  nlPumpTimer = null;
   if (!nl.ready || !nl.moving) return;
   const now = performance.now();
   if (nlPending && now - nlPendingAt < NL_REPLY_TIMEOUT_MS) return;
   // Giving up on a reply: keep the frame time it covered, so any steps it
   // still produces are divided by the right amount.
   if (nlPending) nlAccDt += nlLastDt;
-  // The first request of a stroke has nothing to measure against (the
-  // driver compares with whatever frame time it saw last, possibly from the
-  // previous stroke), so its step is dropped.
-  const dt = nlPrevSent ? now - nlPrevSent : 0;
+  // The driver measures each step from the last frame time it was given.
+  // Thanks to the idle heartbeat below that's normally recent, so even the
+  // first reply of a stroke is a usable step; only if it's stale (window
+  // was unfocused, say) is the first step dropped.
+  const dt = nlPrevSent && now - nlPrevSent < NL_HEARTBEAT_MS * 2.5 ? now - nlPrevSent : 0;
   nlPrevSent = now;
   nlLastDt = dt;
   nlPending = true;
@@ -2390,9 +2416,29 @@ function nlFrame() {
     if (id !== nlReqId) return;   // superseded or the stroke ended
     nlPending = false;
     if (!nl.moving) return;
-    if (dt === 0) { nlAcc.x = nlAcc.y = nlAcc.z = nlAcc.rx = nlAcc.rz = nlAcc.n = 0; return; }
-    nlOnReply(dt);
+    if (dt === 0) nlAcc.x = nlAcc.y = nlAcc.z = nlAcc.rx = nlAcc.rz = nlAcc.n = 0;
+    else nlOnReply(dt);
+    // Next request: right away if the frame time has moved on enough to be
+    // worth a step, otherwise as soon as it has.
+    const wait = Math.max(0, NL_PUMP_MS - (performance.now() - nlPrevSent));
+    nlPumpTimer = setTimeout(nlPump, wait);
   }, () => { if (id === nlReqId) nlStop(); });
+}
+// Idle heartbeat: keep the driver's frame clock ticking between strokes, so
+// a new stroke's first reply measures from a recent time and can be used
+// rather than thrown away -- one fewer round trip (~30ms) before anything
+// moves. Ten tiny WebSocket messages a second, and only while focused.
+const NL_HEARTBEAT_MS = 100;
+setInterval(() => {
+  if (!nl.ready || nl.moving || nlPending || !windowFocused) return;
+  const now = performance.now();
+  nlPrevSent = now;
+  nlMouse.update3dcontroller({ frame: { time: now } }).catch(() => {});
+}, NL_HEARTBEAT_MS);
+
+// Safety net from tick(): restarts the loop if a reply was lost.
+function nlFrame() {
+  if (nl.ready && nl.moving && nlPumpTimer === null) nlPump();
 }
 
 // Only worth trying where the proxy can exist (HTTPS or localhost pages, a
@@ -2664,6 +2710,8 @@ function tick() {
     slowFrameStreak = 0;
   }
   wasMoving = moving;
+  const wantUncapped = moving && settings.uncapWhileFlying;
+  if (wantUncapped !== flyingUncapped) { flyingUncapped = wantUncapped; applyFpsCap(); }
   const inMotionGrace = now - motionStartAt < MOTION_GRACE_MS;
 
   if (qualitySettle > 0 || inMotionGrace) {
