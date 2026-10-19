@@ -2554,6 +2554,9 @@ let fpsSlow = 45;                 // slow framerate average, for resolution deci
 let lowFor = 0, highFor = 0;      // ms the slow average has been well below / above target
 let lastResChangeAt = -Infinity;
 let lastRestEaseAt = 0;
+const REST_SHARPEN_MS = 1000;     // still this long before switching to full resolution
+let restSharpened = false;        // at rest and already switched to full resolution
+let flyResolution = 1;            // resolution flying had settled on, to return to at take-off
 const scratchCarto = new Cesium.Cartographic();
 function tick() {
   const now = performance.now();
@@ -2750,10 +2753,23 @@ function tick() {
   //   rarely: only when the flying framerate has been well off target for a
   //   sustained stretch, by ~10%, then left alone for a while. After a few
   //   flights it settles where this machine can hold the target and stays.
+  // - At rest (v0.3.7): once the camera has been still for a moment, switch
+  //   to full resolution, draw that sharp frame, then sleep. Nothing moves,
+  //   so the rebuild stall goes unseen. Taking off returns to the flying
+  //   resolution in ONE change -- the one stall this costs per flight.
   if (startedMoving) {
     fpsSmoothed = settings.flyTargetFps;
     fpsSlow = settings.flyTargetFps;
     lastResScaleCheck = now;
+    if (restSharpened) {
+      restSharpened = false;
+      setResolutionScale(Math.min(flyResolution, settings.maxResolutionScale));
+    }
+  }
+  if (parked && !restSharpened && idleMs > REST_SHARPEN_MS) {
+    restSharpened = true;
+    flyResolution = currentResolutionScale;   // what flying had settled on
+    setResolutionScale(settings.maxResolutionScale);
   }
 
   if (qualitySettle > 0) {
@@ -2800,6 +2816,7 @@ function tick() {
   }
   // The resolution ceiling slider applies right away (one change, on purpose).
   if (currentResolutionScale > settings.maxResolutionScale + 1e-4) setResolutionScale(settings.maxResolutionScale);
+  if (restSharpened && currentResolutionScale < settings.maxResolutionScale - 1e-4) setResolutionScale(settings.maxResolutionScale);
   // The readouts change every frame but nobody reads numbers at 30Hz, and
   // each write re-lays-out the panel. Four times a second is plenty.
   if (now - lastHudUpdate > 250) {
@@ -2854,6 +2871,7 @@ function tick() {
   if (idleMs > SLEEP_AFTER_MS && !overlayDirty && !minimapDirty && !nl.moving &&
       keysDown.size === 0 && !pad.x && !pad.y && !pad.z && !pad.rx && !pad.rz &&
       currentTerrainSSE <= settings.terrainDetail + 1e-4 &&
+      restSharpened && qualitySettle === 0 &&
       !sceneHasPendingWork()) {
     sleepNow();
   }
