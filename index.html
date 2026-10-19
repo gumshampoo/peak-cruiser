@@ -26,8 +26,11 @@
   /* PeakFinder-style leader-line labels. The element is a zero-size anchor
      placed exactly on the summit's screen point; dot, line and text all
      position themselves off that origin. */
+  /* Positioned with transform rather than left/top: moving a label then
+     only touches compositing, not layout, which matters once 100+ of them
+     are being repositioned every frame. */
   .peak-label {
-    position: absolute; width: 0; height: 0; z-index: 5; pointer-events: none;
+    position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 5; pointer-events: none;
     font-family: sans-serif; color: #fff; text-shadow: 0 0 4px #000, 0 0 3px #000;
   }
   /* Slanted text, pivoting on the top of the leader line. Rotating the names
@@ -66,7 +69,7 @@
     position: absolute; top: 50px; right: 10px; z-index: 10;
     font-family: sans-serif; color: #fff; background: rgba(0,0,0,0.75);
     padding: 14px 16px; border-radius: 6px; font-size: 13px; width: 260px;
-    display: none;
+    display: none; max-height: calc(100vh - 70px); overflow-y: auto;
   }
   #settingsPanel.open { display: block; }
   #settingsPanel .row { margin-bottom: 12px; }
@@ -189,6 +192,7 @@
     <div style="font-weight:bold; font-size:15px; margin-bottom:5px;">🏔 Peak Cruiser</div>
     <button id="connectBtn">SpaceMouseに接続</button><br>
     <span id="status">未接続</span><br>
+    <span style="font-size:11px;opacity:0.85">入力: <span id="inputSources">キーボード</span></span><br>
     速度: <span id="speed">0.0</span> m/s<br>
     高度: <span id="alt">-</span> m<br>
     <span style="color:#ffd54f">FPS: <span id="fps">-</span> &nbsp; 画質: <span id="resScale">-</span></span><br>
@@ -204,6 +208,52 @@
 
 <button id="settingsBtn">⚙ 設定</button>
 <div id="settingsPanel">
+  <div class="row">
+    <label><span>画質プリセット</span></label>
+    <select id="s_preset" style="width:100%; padding:4px;">
+      <option value="">— 選ぶと下の項目をまとめて設定 —</option>
+      <option value="light">軽量 (PCの負荷を最小に)</option>
+      <option value="standard">標準</option>
+      <option value="high">高画質 (リアル優先)</option>
+    </select>
+  </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_skyAtmosphere" style="width:auto;">
+      <span>リアルな空と大気</span>
+    </label>
+  </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_antiAlias" style="width:auto;">
+      <span>輪郭のギザギザを消す (FXAA)</span>
+    </label>
+  </div>
+  <hr style="border:none; border-top:1px solid rgba(255,255,255,0.2); margin:12px 0 10px;">
+  <div class="row">
+    <label><span>ラベルを付ける山</span></label>
+    <select id="s_peakSet" style="width:100%; padding:4px;">
+      <option value="meizan">三百名山のみ (301座)</option>
+      <option value="1500">＋標高1500m以上の山</option>
+      <option value="1000">＋標高1000m以上の山</option>
+      <option value="all">＋名前のある全ての山 (約1.3万座)</option>
+    </select>
+  </div>
+  <div class="row">
+    <label><span>ラベルの最大数</span><span id="v_maxLabels"></span></label>
+    <input type="range" id="s_maxLabels" min="5" max="150" step="5">
+  </div>
+  <div class="row">
+    <label><span>ラベルの間隔</span><span id="v_labelSpacing"></span></label>
+    <input type="range" id="s_labelSpacing" min="12" max="60" step="2">
+  </div>
+  <div class="row">
+    <label style="justify-content:flex-start; gap:8px; cursor:pointer;">
+      <input type="checkbox" id="c_hideOccluded" style="width:auto;">
+      <span>尾根に隠れた山は表示しない</span>
+    </label>
+  </div>
+  <hr style="border:none; border-top:1px solid rgba(255,255,255,0.2); margin:12px 0 10px;">
   <div class="row">
     <label><span>基本速度 (最低速度)</span><span id="v_moveSpeed"></span></label>
     <input type="range" id="s_moveSpeed" min="10" max="50000" step="10">
@@ -310,6 +360,19 @@ viewer.scene.globe.depthTestAgainstTerrain = true;
 // "shape-first, dramatic" look from the earlier Blender attempt.
 viewer.scene.verticalExaggeration = 1.0; // real scale preferred over the dramatic look
 
+// Only draw a frame when something actually changed: the camera moved, a tile
+// arrived, or a setting asked for one (scene.requestRender()). Before v0.3
+// Cesium redrew the whole globe at the frame cap even with the camera parked,
+// which is where most of the idle GPU load came from. The render loop itself
+// keeps running (cheaply), and tick() hangs off it, so input is still read.
+viewer.scene.requestRenderMode = true;
+viewer.scene.maximumRenderTimeChange = Infinity;
+
+// Tiles kept in memory after they scroll out of view (default 100). Turning
+// round to look back at where you just were then redraws from memory instead
+// of re-downloading and re-decoding everything.
+viewer.scene.globe.tileCacheSize = 400;
+
 // ---- Selectable surface textures.
 // Every option here is a plain raster tile layer whose shading is baked in
 // server-side. That's deliberate: Cesium's real-time globe materials (the
@@ -376,10 +439,10 @@ viewer.scene.globe.showWaterEffect = true;
 // takes over once settings load, and drives them from measured FPS.
 viewer.scene.globe.maximumScreenSpaceError = 2;
 viewer.resolutionScale = 0.65;
-viewer.scene.postProcessStages.fxaa.enabled = false; // anti-aliasing pass is real GPU cost for a subtle effect
+viewer.scene.postProcessStages.fxaa.enabled = false; // settings.antiAlias decides, see applyRealism()
 
 viewer.scene.fog.enabled = true;                // wanted back for aerial-perspective depth cueing
-viewer.scene.skyAtmosphere.show = false;        // sky glow/limb ring -- not a terrain depth cue, cut it
+viewer.scene.skyAtmosphere.show = false;        // settings.skyAtmosphere decides, see applyRealism()
 // Ground atmosphere back ON, despite costing a little. It is what supplies
 // the fog's COLOUR: with it off, Cesium blends distant terrain toward a dark
 // unlit tone, which is why far ranges turned into a black band instead of
@@ -425,6 +488,16 @@ viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#b8d4e6');
 // horizon falls back to baseColor and flickers as tiles arrive.
 viewer.scene.globe.preloadSiblings = false;
 viewer.scene.globe.preloadAncestors = true;
+
+// The "looks real" switches. A gradient sky with atmospheric scattering
+// reads far more like being in the mountains than a flat blue backdrop, and
+// costs one extra pass over the sky pixels only. FXAA is a full-screen pass,
+// so it stays off unless asked for.
+function applyRealism() {
+  viewer.scene.skyAtmosphere.show = settings.skyAtmosphere;
+  viewer.scene.postProcessStages.fxaa.enabled = settings.antiAlias;
+  viewer.scene.requestRender();
+}
 
 Cesium.ArcGISTiledElevationTerrainProvider.fromUrl(
   'https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer',
@@ -791,15 +864,6 @@ const MEIZAN = [
 // Labels come from the 301 famous mountains only. Personally-climbed peaks
 // that aren't on any list (御在所岳) are deliberately NOT added -- PEAKS is
 // kept above purely as the record of what's been climbed, for future use.
-const ALL_PEAKS = MEIZAN;
-
-const peakLabelsEl = document.getElementById('peakLabels');
-const peakEntries = ALL_PEAKS.map(p => ({
-  ...p,
-  pos: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.elev),
-  el: null,        // lazily-created DOM element
-}));
-
 const EARTH_R = 6371000;
 // How far away a peak of height `h` can still poke above the horizon, and
 // symmetrically how far the camera at height `h` can see. Without this,
@@ -809,7 +873,82 @@ function horizonDistance(h) {
   return Math.sqrt(Math.max(0, 2 * EARTH_R * h + h * h));
 }
 
-const MAX_PEAK_LABELS = 40; // clutter ceiling -- 100+ names at once is unreadable
+const peakLabelsEl = document.getElementById('peakLabels');
+function makePeakEntry(p) {
+  const pos = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.elev);
+  return {
+    ...p,
+    pos,
+    horizon: horizonDistance(p.elev),
+    el: null,        // lazily-created DOM element
+    occluded: false, // behind a ridge, as of the last line-of-sight test
+    occlAt: null,    // camera position that test was made from
+    occlEpoch: -1,
+  };
+}
+const meizanEntries = MEIZAN.map(makePeakEntry);
+
+// ---- Which peaks get labels (v0.3).
+// The 301 famous mountains on their own leave most views with only a handful
+// of names. peaks-jp.json adds ~12,600 more named summits from OpenStreetMap
+// (with elevation, minus the ones already in MEIZAN); it's only fetched once
+// one of the larger sets is picked. Famous peaks always win a crowded spot:
+// OSM peaks carry rank 400, below 三百名山.
+let peakEntries = meizanEntries;
+let minimapDirty = true;
+// Positions as flat numbers, so the per-frame pre-filter over thousands of
+// peaks is a tight loop over a typed array rather than object property
+// lookups and Cartesian3 allocations.
+let peakXYZ = new Float64Array(0);
+function rebuildPeakXYZ() {
+  peakXYZ = new Float64Array(peakEntries.length * 3);
+  peakEntries.forEach((p, i) => {
+    peakXYZ[i * 3] = p.pos.x; peakXYZ[i * 3 + 1] = p.pos.y; peakXYZ[i * 3 + 2] = p.pos.z;
+  });
+}
+rebuildPeakXYZ();
+
+let osmEntriesPromise = null;
+function loadOsmEntries() {
+  if (!osmEntriesPromise) {
+    osmEntriesPromise = fetch('peaks-jp.json')
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(rows => rows.map(([name, lon, lat, elev]) => makePeakEntry({ name, lon, lat, elev, rank: 400 })))
+      .catch(e => { osmEntriesPromise = null; throw e; });
+  }
+  return osmEntriesPromise;
+}
+
+let peakSetToken = 0;
+let osmCreditAdded = false;
+async function applyPeakSet() {
+  const token = ++peakSetToken;
+  let next = meizanEntries;
+  if (settings.peakSet !== 'meizan') {
+    try {
+      const osm = await loadOsmEntries();
+      const minElev = settings.peakSet === 'all' ? -Infinity : Number(settings.peakSet);
+      next = meizanEntries.concat(osm.filter(p => p.elev >= minElev));
+    } catch (e) {
+      // Opened straight from disk (file://) the fetch is refused. Fall back
+      // to the famous mountains rather than showing nothing.
+      console.warn('peaks-jp.json could not be loaded:', e);
+    }
+  }
+  if (token !== peakSetToken) return; // a newer choice arrived meanwhile
+  const keep = new Set(next);
+  for (const p of peakEntries) if (!keep.has(p) && p.el) p.el.style.display = 'none';
+  if (next !== meizanEntries && !osmCreditAdded) {
+    // ODbL asks for the attribution wherever the data is shown.
+    viewer.creditDisplay.addStaticCredit(new Cesium.Credit('山データ © OpenStreetMap contributors'));
+    osmCreditAdded = true;
+  }
+  peakEntries = next;
+  rebuildPeakXYZ();
+  labelsOnScreen = labelsOnScreen.filter(p => keep.has(p));
+  overlayDirty = true;
+  minimapDirty = true;
+}
 // All labels share one text row, so the names line up instead of bobbing
 // with each summit's height. The row isn't a fixed screen position though:
 // it's placed just above whichever visible peak sits highest in frame, so it
@@ -821,7 +960,8 @@ const LABEL_MIN_LINE = 8;  // keep a stub of leader line even when cramped
 // With every label on one row, the 45-degree baselines are all offset purely
 // by x, so plain horizontal spacing is what keeps the slanted names apart:
 // a dx gap leaves dx/sqrt(2) of perpendicular clearance between them.
-const LABEL_MIN_DX = 26;   // ~18px perpendicular clearance at 45 degrees
+// settings.labelSpacing is that dx; the default 26px leaves ~18px of
+// perpendicular clearance at 45 degrees.
 // Estimating the rendered width of a label without measuring it. Reading
 // offsetWidth would force a layout for every label on every frame, so this
 // approximates instead: CJK glyphs are full-width at the 13px name font,
@@ -957,14 +1097,15 @@ function bearingDeg(lat1, lon1, lat2, lon2) {
 
 // One glyph per list, for the nearby panel. Deliberately NOT used on the 3D
 // labels -- badges and colour there turned the skyline into a ranking.
-const RANK_BADGE = { 100: '★', 200: '☆', 300: '·' };
+const RANK_BADGE = { 100: '★', 200: '☆', 300: '·', 400: '' };
 
 const nearbyPanel = document.getElementById('nearbyPanel');
 const nearbyListEl = document.getElementById('nearbyList');
-document.getElementById('nearbyBtn').addEventListener('click', () => {
+function toggleNearby() {
   nearbyPanel.classList.toggle('open');
   if (nearbyPanel.classList.contains('open')) updateNearbyList();
-});
+}
+document.getElementById('nearbyBtn').addEventListener('click', toggleNearby);
 
 function updateNearbyList() {
   if (!nearbyPanel.classList.contains('open')) return; // hidden: don't bother
@@ -973,12 +1114,21 @@ function updateNearbyList() {
   const latDeg = Cesium.Math.toDegrees(carto.latitude);
   const lonDeg = Cesium.Math.toDegrees(carto.longitude);
 
-  const rows = peakEntries.map(p => ({
-    p, d: Cesium.Cartesian3.distance(p.pos, camPos),
-  })).sort((a, b) => a.d - b.d).slice(0, 25);
+  // Up to ~13,000 peaks: measure on the flat array, keep a running top 25,
+  // and only build row objects for those.
+  const rows = [];
+  const cx = camPos.x, cy = camPos.y, cz = camPos.z;
+  for (let i = 0; i < peakEntries.length; i++) {
+    const dx = peakXYZ[i * 3] - cx, dy = peakXYZ[i * 3 + 1] - cy, dz = peakXYZ[i * 3 + 2] - cz;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (rows.length === 25 && d >= rows[24].d) continue;
+    rows.push({ p: peakEntries[i], d });
+    rows.sort((a, b) => a.d - b.d);
+    if (rows.length > 25) rows.pop();
+  }
 
   const html = ['<div class="legend">' +
-    `${RANK_BADGE[100]}百名山 ${RANK_BADGE[200]}二百名山 ${RANK_BADGE[300]}三百名山` +
+    `${RANK_BADGE[100]}百名山 ${RANK_BADGE[200]}二百名山 ${RANK_BADGE[300]}三百名山 無印=その他` +
     ' &nbsp;<span class="vis">●</span>いま見えている</div>', '<table>'];
   for (const { p, d } of rows) {
     const b = bearingDeg(latDeg, lonDeg, p.lat, p.lon);
@@ -997,13 +1147,114 @@ function updateNearbyList() {
 }
 setInterval(updateNearbyList, 700);
 
-// NOTE: terrain-occlusion culling was removed in v0.3.0.
-// Ray-casting every peak against the terrain mesh to hide the ones behind a
-// ridge was by far the most expensive thing in the app, and the payoff was
-// small: peaks hidden behind a ridge are usually distant ones that the
-// distance fade already plays down. The horizon test below still removes
-// anything genuinely over the earth's curve, which is the case that actually
-// looked wrong.
+// ---- Ridge occlusion (v0.3), on our own coarse elevation grid.
+// Raycasting Cesium's terrain mesh for this was by far the most expensive
+// thing the app ever did, and was dropped in v0.2. This does the same job
+// without touching the renderer: GSI's elevation tiles (dem_png, z9, about
+// 300m a pixel) are decoded into plain Float32Arrays, and a line of sight is
+// a few hundred array reads -- tens of microseconds per peak. It runs off a
+// timer with a small time budget, so it can never hold up a frame.
+const DEM_Z = 9;
+const DEM_NA = 8388608;          // 2^23: "no data" (sea)
+const demTiles = new Map();      // "x/y" -> Float32Array | 'loading' | 'sea'
+let demLoading = 0;
+let demEpoch = 0;                // bumped whenever a tile arrives
+function demTile(tx, ty) {
+  const key = tx + '/' + ty;
+  const t = demTiles.get(key);
+  if (t !== undefined) return t;
+  if (demLoading >= 4) return 'loading';
+  demTiles.set(key, 'loading');
+  demLoading++;
+  fetch(`${GSI}/dem_png/${DEM_Z}/${tx}/${ty}.png`)
+    .then(r => {
+      if (r.status === 404) return null; // outside Japan's coverage: open sea
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.blob();
+    })
+    .then(async blob => {
+      if (!blob) { demTiles.set(key, 'sea'); return; }
+      // No colour management: the RGB values ARE the elevation.
+      const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+      const cv = new OffscreenCanvas(256, 256);
+      const ctx = cv.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(bmp, 0, 0);
+      const px = ctx.getImageData(0, 0, 256, 256).data;
+      const h = new Float32Array(256 * 256);
+      for (let i = 0; i < h.length; i++) {
+        const v = (px[i * 4] << 16) | (px[i * 4 + 1] << 8) | px[i * 4 + 2];
+        h[i] = v === DEM_NA ? 0 : (v < DEM_NA ? v : v - 2 * DEM_NA) * 0.01;
+      }
+      demTiles.set(key, h);
+    })
+    .catch(() => demTiles.delete(key)) // transient failure: retry later
+    .finally(() => { demLoading--; demEpoch++; });
+  return 'loading';
+}
+// Ground height in metres, 0 for sea, null while the tile is still on its way.
+function demHeight(lon, lat) {
+  const n = 1 << DEM_Z;
+  const fx = (lon + 180) / 360 * n;
+  const fy = tileYFrac(lat, DEM_Z);
+  const tx = Math.floor(fx), ty = Math.floor(fy);
+  const t = demTile(tx, ty);
+  if (t === 'loading') return null;
+  if (t === 'sea') return 0;
+  const px = Math.min(255, Math.floor((fx - tx) * 256));
+  const py = Math.min(255, Math.floor((fy - ty) * 256));
+  return t[py * 256 + px];
+}
+
+// Does the ground anywhere between the camera and the summit rise above the
+// straight line joining them? Earth curvature is included: along a chord of
+// length d the surface bulges up by f(1-f)d^2/2R. Returns null when part of
+// the path has no elevation data yet, so the answer can be retried.
+const OCCL_MARGIN = 20;          // m of slack for the coarse grid
+function ridgeBlocks(peak, camLon, camLat, camH, dist) {
+  const steps = Math.min(600, Math.max(16, Math.ceil(dist / 250)));
+  // Stop short of the summit itself: its own shoulders, smeared by a 300m
+  // grid, would otherwise count as "in the way".
+  const stopAt = 1 - Math.min(0.5, 400 / dist);
+  const k = dist * dist / (2 * EARTH_R);
+  let incomplete = false;
+  for (let i = 1; i < steps; i++) {
+    const f = i / steps;
+    if (f > stopAt) break;
+    const g = demHeight(camLon + (peak.lon - camLon) * f, camLat + (peak.lat - camLat) * f);
+    if (g === null) { incomplete = true; continue; }
+    const lineH = camH + (peak.elev - camH) * f - f * (1 - f) * k;
+    if (g > lineH + OCCL_MARGIN) return true;
+  }
+  return incomplete ? null : false;
+}
+
+// Filled in by updatePeakLabels: on-screen candidates in priority order.
+let occlCandidates = [];
+const OCCL_BUDGET_MS = 5;
+setInterval(() => {
+  if (!settings.hideOccluded || !windowFocused || occlCandidates.length === 0) return;
+  const t0 = performance.now();
+  const camPos = viewer.camera.positionWC;
+  const carto = Cesium.Cartographic.fromCartesian(camPos);
+  const camLon = Cesium.Math.toDegrees(carto.longitude);
+  const camLat = Cesium.Math.toDegrees(carto.latitude);
+  let changed = false;
+  for (const c of occlCandidates) {
+    if (performance.now() - t0 > OCCL_BUDGET_MS) break;
+    const p = c.peak;
+    // Occlusion only depends on where the camera IS, not where it looks, and
+    // changes slowly with distance -- so a result stays good until the camera
+    // has moved a small fraction of the way to the peak.
+    const moved = p.occlAt ? Cesium.Cartesian3.distance(camPos, p.occlAt) : Infinity;
+    if (p.occlEpoch === demEpoch && moved < Math.max(30, c.distance * 0.005)) continue;
+    const r = ridgeBlocks(p, camLon, camLat, carto.height, c.distance);
+    p.occlAt = Cesium.Cartesian3.clone(camPos, p.occlAt || new Cesium.Cartesian3());
+    p.occlEpoch = r === null ? -1 : demEpoch;
+    const occ = r === true;
+    if (occ !== p.occluded) { p.occluded = occ; changed = true; }
+  }
+  if (changed) overlayDirty = true;
+}, 80);
 
 // Cosine of the half-angle of a cone that contains the whole frustum, with a
 // margin so a label whose anchor is just off-screen (but whose slanted text
@@ -1026,6 +1277,13 @@ window.addEventListener('resize', updateViewCone);
 // Above this the view is essentially "Japan from space": every peak is a
 // dot, the labels are meaningless clutter, and drawing them is pure cost.
 const LABEL_MAX_CAMERA_HEIGHT = 500000;
+// Never project more than this many candidates in one frame. With ~13,000
+// peaks loaded a high view can have thousands in the cone; they're taken in
+// priority order, so the ones skipped could never have won a slot anyway.
+const LABEL_MAX_PROJECT = 3000;
+
+let labelsOnScreen = [];          // peaks whose label is currently displayed
+const scratchVP = new Cesium.Matrix4();
 
 function updatePeakLabels() {
   const canvas = viewer.canvas;
@@ -1033,53 +1291,72 @@ function updatePeakLabels() {
   const camPos = viewer.camera.positionWC;
   const camCarto = Cesium.Cartographic.fromCartesian(camPos);
   if (camCarto.height > LABEL_MAX_CAMERA_HEIGHT) {
-    for (const peak of peakEntries) if (peak.el) peak.el.style.display = 'none';
+    for (const peak of labelsOnScreen) peak.el.style.display = 'none';
+    labelsOnScreen = [];
+    occlCandidates = [];
     return;
   }
   const camHorizon = horizonDistance(Math.max(0, camCarto.height));
   const forward = viewer.camera.directionWC;
+  const cx = camPos.x, cy = camPos.y, cz = camPos.z;
+  const fx = forward.x, fy = forward.y, fz = forward.z;
+  // World -> screen, done by hand with one view-projection matrix built per
+  // frame. SceneTransforms.worldToWindowCoordinates costs ~2.4us a call
+  // (scene-mode checks, drawing-buffer conversions); this is a dozen
+  // multiplies, which is what makes thousands of candidates affordable.
+  const m = Cesium.Matrix4.multiply(
+    viewer.camera.frustum.projectionMatrix, viewer.camera.viewMatrix, scratchVP);
 
-  const candidates = [];
-  for (const peak of peakEntries) {
-    const toPeak = Cesium.Cartesian3.subtract(peak.pos, camPos, new Cesium.Cartesian3());
-    const distance = Cesium.Cartesian3.magnitude(toPeak);
-
-    // Beyond the combined horizon the peak is behind the earth's curve.
-    if (distance > camHorizon + horizonDistance(peak.elev)) continue;
-
-    // Reject anything outside the view cone before paying for a projection.
-    // "In front of the camera" (dot > 0) is a half-space test and lets
-    // through everything in a 180-degree arc, so most of what survived it
-    // was still projected only to be thrown away on the screen-bounds check
-    // below. Comparing against the frustum's own half-angle instead cuts the
-    // number of projections by roughly five times.
-    const dot = Cesium.Cartesian3.dot(Cesium.Cartesian3.normalize(toPeak, new Cesium.Cartesian3()), forward);
-    if (dot <= viewConeCos) continue;
-    const win = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, peak.pos);
-    if (!win || win.x < 0 || win.x > cw || win.y < 0 || win.y > ch) continue;
-
-    candidates.push({ peak, win, distance });
+  // Pass 1, pure arithmetic: over the earth's curve? outside the view cone?
+  // Comparing against the frustum's own half-angle (not just "in front")
+  // throws away most peaks before any projection is paid for.
+  const inCone = [];
+  for (let i = 0; i < peakEntries.length; i++) {
+    const dx = peakXYZ[i * 3] - cx, dy = peakXYZ[i * 3 + 1] - cy, dz = peakXYZ[i * 3 + 2] - cz;
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const peak = peakEntries[i];
+    if (distance > camHorizon + peak.horizon) continue;
+    if ((dx * fx + dy * fy + dz * fz) / distance <= viewConeCos) continue;
+    inCone.push({ peak, distance, x: 0, y: 0 });
   }
 
   // Greedy placement by fame first: when two names would collide, the more
-  // celebrated peak keeps its label -- climbed (0), then 百名山, 二百名山,
-  // 三百名山. Distance only breaks ties within the same list, where the
-  // nearer summit wins because it's the one you can actually pick out.
-  candidates.sort((a, b) => a.peak.rank - b.peak.rank || a.distance - b.distance);
+  // celebrated peak keeps its label -- 百名山, 二百名山, 三百名山, then the
+  // rest. Distance only breaks ties within the same list, where the nearer
+  // summit wins because it's the one you can actually pick out.
+  inCone.sort((a, b) => a.peak.rank - b.peak.rank || a.distance - b.distance);
 
+  const maxLabels = settings.maxLabels;
+  const minDx = settings.labelSpacing;
+  const hideOccluded = settings.hideOccluded;
   const shown = [];
-  for (const cand of candidates) {
-    if (shown.length >= MAX_PEAK_LABELS) break;
-    if (shown.some(s => Math.abs(s.win.x - cand.win.x) < LABEL_MIN_DX)) continue;
+  const occl = [];
+  let projected = 0;
+  for (const cand of inCone) {
+    if (shown.length >= maxLabels || projected >= LABEL_MAX_PROJECT) break;
+    projected++;
+    const P = cand.peak.pos;
+    const w = m[3] * P.x + m[7] * P.y + m[11] * P.z + m[15];
+    if (w <= 0) continue;
+    const sx = ((m[0] * P.x + m[4] * P.y + m[8] * P.z + m[12]) / w + 1) * 0.5 * cw;
+    const sy = (1 - (m[1] * P.x + m[5] * P.y + m[9] * P.z + m[13]) / w) * 0.5 * ch;
+    if (sx < 0 || sx > cw || sy < 0 || sy > ch) continue;
+    cand.x = sx; cand.y = sy;
+    // Every on-screen contender goes to the occlusion checker, hidden or
+    // not, so a peak that comes back into view is noticed.
+    if (occl.length < maxLabels * 4) occl.push(cand);
+    if (hideOccluded && cand.peak.occluded) continue;
+    if (shown.some(s => Math.abs(s.x - cand.x) < minDx)) continue;
     shown.push(cand);
   }
+  occlCandidates = occl;
 
   // One shared row for every label, sitting just above the highest peak
   // that's actually on screen.
   let rowY = LABEL_MIN_Y;
   if (shown.length) {
     let highest = Infinity;
-    for (const s of shown) if (s.win.y < highest) highest = s.win.y;
+    for (const s of shown) if (s.y < highest) highest = s.y;
     rowY = Math.max(LABEL_MIN_Y, highest - LABEL_OFFSET);
   }
 
@@ -1102,17 +1379,19 @@ function updatePeakLabels() {
   // only a stub of leader line, so its text starts just above the summit.
   for (let i = shown.length - 1; i >= 0; i--) {
     const s = shown[i];
-    const pivotY = Math.min(rowY, s.win.y - LABEL_MIN_LINE);
+    const pivotY = Math.min(rowY, s.y - LABEL_MIN_LINE);
     if (pivotY - labelTopExtent(s.peak) < 0) shown.splice(i, 1);
   }
 
+  // Hide only what was showing last frame and isn't now -- not a sweep over
+  // every peak, which with the large sets would be 13,000 checks a frame.
   const shownSet = new Set(shown.map(c => c.peak));
-
-  for (const peak of peakEntries) {
-    if (!shownSet.has(peak) && peak.el) peak.el.style.display = 'none';
+  for (const peak of labelsOnScreen) {
+    if (!shownSet.has(peak)) peak.el.style.display = 'none';
   }
+  labelsOnScreen = shown.map(c => c.peak);
 
-  for (const { peak, win, distance } of shown) {
+  for (const { peak, x, y, distance } of shown) {
     if (!peak.el) {
       const el = document.createElement('div');
       el.className = 'peak-label';
@@ -1127,20 +1406,21 @@ function updatePeakLabels() {
       peak.elName = el.querySelector('.name');
       peak.elDist = el.querySelector('.dist');
       peak.elLine = el.querySelector('.line');
-      peak.lastName = null;
+      peak.elName.textContent = peak.name; // never changes for a given peak
+      peak.lastDist = null;
       peak.lastOpacity = null;
-      peak.lastFlip = null;
+      peak.lastLineH = null;
     }
     peak.el.style.display = '';
     // The element is a zero-size anchor sitting exactly on the summit.
-    peak.el.style.left = win.x + 'px';
-    peak.el.style.top = win.y + 'px';
-    // The name never changes for a given peak -- only write it once.
-    if (peak.lastName !== peak.name) {
-      peak.elName.textContent = peak.name;
-      peak.lastName = peak.name;
+    peak.el.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`;
+    // Text writes are the expensive kind (they re-shape the glyphs), so only
+    // when the shown value actually changes.
+    const distText = `${(distance / 1000).toFixed(1)} km / ${peak.elev} m`;
+    if (peak.lastDist !== distText) {
+      peak.elDist.textContent = distText;
+      peak.lastDist = distText;
     }
-    peak.elDist.textContent = `${(distance / 1000).toFixed(1)} km / ${peak.elev} m`;
     // Fade with distance. Quantised to 2dp so a slowly-changing value doesn't
     // dirty the element's style on every single frame.
     const t = Cesium.Math.clamp(
@@ -1152,9 +1432,12 @@ function updatePeakLabels() {
     }
     // Leader line runs from the summit up to the shared row; the slanted
     // text then takes off from the top of that line.
-    const lineH = Math.max(LABEL_MIN_LINE, win.y - rowY);
-    peak.elLine.style.height = lineH + 'px';
-    peak.elRot.style.bottom = lineH + 'px';
+    const lineH = Math.round(Math.max(LABEL_MIN_LINE, y - rowY));
+    if (peak.lastLineH !== lineH) {
+      peak.elLine.style.height = lineH + 'px';
+      peak.elRot.style.bottom = lineH + 'px';
+      peak.lastLineH = lineH;
+    }
   }
 }
 
@@ -1201,8 +1484,23 @@ const DEFAULTS = {
   // ---- v0.2: being a good neighbour to the rest of the machine ----
   fpsCap: 30,                // hard ceiling on rendered frames/sec (0 = off)
   pauseWhenUnfocused: true,  // stop rendering entirely in the background
-  maxTileRequests: 12,       // concurrent tile downloads
+  tileRequests: 24,          // concurrent tile downloads
   inputSmoothing: 0.12,      // seconds of lag on stick input (0 = raw)
+  // ---- v0.3 ----
+  skyAtmosphere: true,       // gradient sky with atmospheric scattering
+  antiAlias: false,          // FXAA pass
+  peakSet: '1500',           // 'meizan' | '1500' | '1000' | 'all'
+  maxLabels: 50,             // clutter ceiling for names on screen at once
+  labelSpacing: 26,          // px: min horizontal gap between label anchors
+  hideOccluded: true,        // drop labels for peaks hidden behind a ridge
+};
+// "Make it lighter" / "make it look real" in one move. Each preset only
+// writes ordinary settings, so everything stays individually adjustable
+// afterwards.
+const QUALITY_PRESETS = {
+  light:    { maxResolutionScale: 0.5,  terrainDetail: 2.0, fpsCap: 24, skyAtmosphere: false, antiAlias: false, fogDensity: 0.5 },
+  standard: { maxResolutionScale: 0.65, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: true,  antiAlias: false, fogDensity: 0.5 },
+  high:     { maxResolutionScale: 1.0,  terrainDetail: 1.0, fpsCap: 60, skyAtmosphere: true,  antiAlias: true,  fogDensity: 0.7 },
 };
 let settings = { ...DEFAULTS };
 try {
@@ -1214,6 +1512,9 @@ try {
   if (!IMAGERY_OPTIONS.some(o => o.id === settings.imagery)) {
     settings.imagery = DEFAULTS.imagery;
   }
+  // v0.2 stored the tile-download limit (12) as maxTileRequests; it had no
+  // UI, so the old value would otherwise pin every existing install to it.
+  delete settings.maxTileRequests;
 } catch (e) { /* ignore corrupt storage */ }
 
 function saveSettings() {
@@ -1261,6 +1562,8 @@ const SLIDER_DEFS = [
   { key: 'labelFarOpacity', slider: 's_labelFarOpacity', value: 'v_labelFarOpacity', fmt: v => Math.round(v * 100) + '%' },
   { key: 'fpsCap', slider: 's_fpsCap', value: 'v_fpsCap', fmt: v => v === 0 ? '無制限' : v.toFixed(0) + ' fps' },
   { key: 'inputSmoothing', slider: 's_inputSmoothing', value: 'v_inputSmoothing', fmt: v => v === 0 ? 'なし' : v.toFixed(2) + ' 秒' },
+  { key: 'maxLabels', slider: 's_maxLabels', value: 'v_maxLabels', fmt: v => v.toFixed(0) + ' 個' },
+  { key: 'labelSpacing', slider: 's_labelSpacing', value: 'v_labelSpacing', fmt: v => v.toFixed(0) + ' px' },
   { key: 'fogDensity', slider: 's_fogDensity', value: 'v_fogDensity', fmt: v => v === 0 ? 'なし' : v.toFixed(2) },
   { key: 'timeOfDay', slider: 's_timeOfDay', value: 'v_timeOfDay', fmt: v => {
       const hh = Math.floor(v), mm = Math.round((v - hh) * 60);
@@ -1277,6 +1580,10 @@ function refreshSettingsUI() {
   document.getElementById('c_sunLighting').checked = settings.sunLighting;
   document.getElementById('c_pauseWhenUnfocused').checked = settings.pauseWhenUnfocused;
   document.getElementById('s_imagery').value = settings.imagery;
+  document.getElementById('c_skyAtmosphere').checked = settings.skyAtmosphere;
+  document.getElementById('c_antiAlias').checked = settings.antiAlias;
+  document.getElementById('c_hideOccluded').checked = settings.hideOccluded;
+  document.getElementById('s_peakSet').value = settings.peakSet;
 }
 // Yes: rendering the rest of the world does cost. Looking at the horizon
 // throws a frustum thousands of km deep, and Cesium dutifully streams coarse
@@ -1361,8 +1668,11 @@ applyFpsCap();
 // saturate a connection; that competes with everything else on the machine
 // for network and disk while adding nothing once the view is full.
 function applyTileLimit() {
-  Cesium.RequestScheduler.maximumRequests = settings.maxTileRequests;
-  Cesium.RequestScheduler.maximumRequestsPerServer = Math.max(2, Math.round(settings.maxTileRequests / 3));
+  // v0.3: raised from 12 total / 4 per server. Waiting on tiles, not the
+  // GPU, was what made new ground appear slowly, and the terrain and GSI
+  // servers both speak HTTP/2, where more parallel requests are cheap.
+  Cesium.RequestScheduler.maximumRequests = settings.tileRequests;
+  Cesium.RequestScheduler.maximumRequestsPerServer = Math.max(4, Math.round(settings.tileRequests / 2));
 }
 applyTileLimit();
 
@@ -1478,8 +1788,7 @@ document.getElementById('s_terrainDetail').addEventListener('input', () => {
   currentTerrainSSE = settings.terrainDetail;
   viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
 });
-document.getElementById('resetBtn').addEventListener('click', () => {
-  settings = { ...DEFAULTS };
+function applyAllSettings() {
   saveSettings();
   refreshSettingsUI();
   currentResolutionScale = settings.maxResolutionScale;
@@ -1490,9 +1799,47 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   applyFpsCap();
   applyTileLimit();
   applyFocusState();
+  applySunLighting();
+  applyRealism();
+  applyPeakSet();
   currentTerrainSSE = settings.terrainDetail;
   viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+  overlayDirty = true;
+  viewer.scene.requestRender();
+}
+document.getElementById('resetBtn').addEventListener('click', () => {
+  settings = { ...DEFAULTS };
+  applyAllSettings();
 });
+document.getElementById('s_preset').addEventListener('change', (e) => {
+  const preset = QUALITY_PRESETS[e.target.value];
+  if (!preset) return;
+  Object.assign(settings, preset);
+  if (settings.minResolutionScale > settings.maxResolutionScale) {
+    settings.minResolutionScale = settings.maxResolutionScale;
+  }
+  applyAllSettings();
+  e.target.value = '';  // a one-shot action, not a mode
+});
+for (const [id, key, apply] of [
+  ['c_skyAtmosphere', 'skyAtmosphere', applyRealism],
+  ['c_antiAlias', 'antiAlias', applyRealism],
+  ['c_hideOccluded', 'hideOccluded', () => { overlayDirty = true; }],
+]) {
+  document.getElementById(id).addEventListener('change', (e) => {
+    settings[key] = e.target.checked;
+    saveSettings();
+    apply();
+  });
+}
+document.getElementById('s_peakSet').addEventListener('change', (e) => {
+  settings.peakSet = e.target.value;
+  saveSettings();
+  applyPeakSet();
+});
+applyRealism();
+// Deferred: the overlay state it touches is declared further down.
+setTimeout(applyPeakSet, 0);
 document.getElementById('settingsBtn').addEventListener('click', () => {
   document.getElementById('settingsPanel').classList.toggle('open');
 });
@@ -1500,37 +1847,188 @@ refreshSettingsUI();
 
 function deadzone(v) { return Math.abs(v) < settings.deadzone ? 0 : v; }
 
-document.getElementById('connectBtn').addEventListener('click', async () => {
-  const statusEl = document.getElementById('status');
+// ---- External input devices (v0.3) ----
+//
+// SpaceMouse over WebHID. Two things changed from v0.2:
+//
+// * The picker only lists 6-DOF controllers. Filtering on vendor 0x046d
+//   alone offered every Logitech mouse and keyboard on the machine, and
+//   picking the wrong one silently did nothing. Newer units (SpaceMouse
+//   Compact / Wireless / Pro / Enterprise, and the Universal Receiver) use
+//   3Dconnexion's own vendor id 0x256f, which wasn't listed at all.
+// * Once permission has been granted, the device is re-opened automatically
+//   on page load and whenever it's plugged back in -- no button press.
+const SPACEMOUSE_FILTERS = [
+  { vendorId: 0x046d, usagePage: 0x01, usage: 0x08 }, // older 3Dconnexion (Logitech id)
+  { vendorId: 0x256f, usagePage: 0x01, usage: 0x08 }, // 3Dconnexion
+];
+function isSpaceMouse(device) {
+  return device.collections.some(c => c.usagePage === 0x01 && c.usage === 0x08) &&
+         (device.vendorId === 0x046d || device.vendorId === 0x256f);
+}
+
+const statusEl = document.getElementById('status');
+const connectBtn = document.getElementById('connectBtn');
+let hidDevice = null;
+let hidButtons = 0;               // bitmask from report 3
+function setStatus(text, ok) {
+  statusEl.textContent = text;
+  statusEl.className = ok ? 'ok' : 'bad';
+}
+function zeroStick() {
+  sm.x = sm.y = sm.z = sm.rx = sm.ry = sm.rz = 0;
+  hidButtons = 0;
+}
+
+function onHidReport(event) {
+  const d = event.data;
+  const n = i => deadzone(d.getInt16(i, true) / AXIS_MAX);
+  if (event.reportId === 1 && d.byteLength >= 12) {
+    // Newer firmware sends all six axes in one report.
+    sm.x = n(0); sm.y = n(2); sm.z = n(4);
+    sm.rx = n(6); sm.ry = n(8); sm.rz = n(10);
+  } else if (event.reportId === 1 && d.byteLength >= 6) {
+    sm.x = n(0); sm.y = n(2); sm.z = n(4);
+  } else if (event.reportId === 2 && d.byteLength >= 6) {
+    sm.rx = n(0); sm.ry = n(2); sm.rz = n(4);
+  } else if (event.reportId === 3 && d.byteLength >= 1) {
+    const prev = hidButtons;
+    hidButtons = d.byteLength >= 4 ? d.getUint32(0, true) : d.getUint8(0);
+    const pressed = hidButtons & ~prev;
+    // Left button: level the view (ease pitch back to the horizon).
+    // Right button: open/close the nearby-peaks list.
+    if (pressed & 1) levelRequested = true;
+    if (pressed & 2) toggleNearby();
+  }
+}
+
+async function openSpaceMouse(device) {
+  if (hidDevice === device && device.opened) return;
+  try {
+    if (!device.opened) await device.open();
+  } catch (e) {
+    // The usual cause: 3Dconnexion's own driver (3DxWare) holds the device.
+    setStatus('開けません: 3DxWare(純正ドライバ)を終了してください', false);
+    return;
+  }
+  if (hidDevice && hidDevice !== device) hidDevice.removeEventListener('inputreport', onHidReport);
+  hidDevice = device;
+  device.addEventListener('inputreport', onHidReport);
+  setStatus('接続: ' + device.productName, true);
+  connectBtn.textContent = 'SpaceMouse 接続済み';
+  updateInputSources();
+}
+
+connectBtn.addEventListener('click', async () => {
   if (!('hid' in navigator)) {
-    statusEl.textContent = 'WebHID非対応ブラウザです';
-    statusEl.className = 'bad';
+    setStatus('WebHID非対応ブラウザです (Chrome / Edge を使ってください)', false);
     return;
   }
   try {
-    const devices = await navigator.hid.requestDevice({ filters: [{ vendorId: 0x046d }] });
-    if (devices.length === 0) { statusEl.textContent = '未選択'; statusEl.className = 'bad'; return; }
-    const device = devices[0];
-    await device.open();
-    statusEl.textContent = '接続: ' + device.productName;
-    statusEl.className = 'ok';
-    device.addEventListener('inputreport', (event) => {
-      const d = event.data;
-      if (event.reportId === 1 && d.byteLength >= 6) {
-        sm.x = deadzone(d.getInt16(0, true) / AXIS_MAX);
-        sm.y = deadzone(d.getInt16(2, true) / AXIS_MAX);
-        sm.z = deadzone(d.getInt16(4, true) / AXIS_MAX);
-      } else if (event.reportId === 2 && d.byteLength >= 6) {
-        sm.rx = deadzone(d.getInt16(0, true) / AXIS_MAX);
-        sm.ry = deadzone(d.getInt16(2, true) / AXIS_MAX);
-        sm.rz = deadzone(d.getInt16(4, true) / AXIS_MAX);
-      }
-    });
+    const devices = await navigator.hid.requestDevice({ filters: SPACEMOUSE_FILTERS });
+    // A wireless receiver can expose several collections as separate
+    // devices; take the one that is actually the 6-DOF controller.
+    const device = devices.find(isSpaceMouse) || devices[0];
+    if (!device) { setStatus('未選択', false); return; }
+    await openSpaceMouse(device);
   } catch (e) {
-    statusEl.textContent = 'エラー: ' + e.message;
-    statusEl.className = 'bad';
+    setStatus('エラー: ' + e.message, false);
   }
 });
+
+if ('hid' in navigator) {
+  navigator.hid.getDevices().then(devices => {
+    const device = devices.find(isSpaceMouse);
+    if (device) openSpaceMouse(device);
+  });
+  navigator.hid.addEventListener('connect', e => {
+    if (isSpaceMouse(e.device)) openSpaceMouse(e.device);
+  });
+  navigator.hid.addEventListener('disconnect', e => {
+    if (e.device !== hidDevice) return;
+    // Without this the last stick reading stayed latched and the camera
+    // kept flying on its own after the cable came out.
+    hidDevice.removeEventListener('inputreport', onHidReport);
+    hidDevice = null;
+    zeroStick();
+    setStatus('切断されました (挿し直すと自動で再接続)', false);
+    connectBtn.textContent = 'SpaceMouseに接続';
+    updateInputSources();
+  });
+}
+
+// Gamepad (Xbox / PlayStation / Switch Pro, anything the browser maps to the
+// "standard" layout). Left stick moves, right stick looks, triggers climb
+// and descend, A levels the view. Polled once per frame from tick().
+const PAD_DEADZONE = 0.12;
+let padConnected = false;
+function padAxis(v) {
+  if (Math.abs(v) < PAD_DEADZONE) return 0;
+  // Rescale past the deadzone and square it: fine control near the centre,
+  // full speed still available at the edge.
+  const t = (Math.abs(v) - PAD_DEADZONE) / (1 - PAD_DEADZONE);
+  return Math.sign(v) * t * t;
+}
+const pad = { x: 0, y: 0, z: 0, rx: 0, rz: 0, a: false };
+function pollGamepad() {
+  pad.x = pad.y = pad.z = pad.rx = pad.rz = 0;
+  if (!padConnected) return;
+  const gp = [...navigator.getGamepads()].find(g => g && g.connected);
+  if (!gp) return;
+  const ax = gp.axes;
+  pad.x = padAxis(ax[0] || 0);
+  pad.y = padAxis(ax[1] || 0);
+  pad.rz = padAxis(ax[2] || 0);
+  pad.rx = -padAxis(ax[3] || 0);
+  const b = i => (gp.buttons[i] ? gp.buttons[i].value : 0);
+  pad.z = b(6) - b(7);              // LT descends, RT climbs
+  const a = b(0) > 0.5;
+  if (a && !pad.a) levelRequested = true;
+  pad.a = a;
+}
+window.addEventListener('gamepadconnected', () => { padConnected = true; updateInputSources(); });
+window.addEventListener('gamepaddisconnected', () => {
+  padConnected = [...navigator.getGamepads()].some(g => g && g.connected);
+  updateInputSources();
+});
+
+// Keyboard, so the app is flyable with nothing plugged in.
+//   W/S forward/back, A/D sideways, E/Space up, Q/C down,
+//   arrows turn and look, Shift = 4x speed, H = level the view.
+const keysDown = new Set();
+window.addEventListener('keydown', e => {
+  // Leave keys alone while a settings control has focus -- the sliders and
+  // dropdowns use the arrows themselves.
+  const tag = e.target && e.target.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  keysDown.add(e.code);
+  if (e.code === 'KeyH') levelRequested = true;
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
+window.addEventListener('keyup', e => keysDown.delete(e.code));
+window.addEventListener('blur', () => keysDown.clear());
+const kb = { x: 0, y: 0, z: 0, rx: 0, rz: 0 };
+function pollKeyboard() {
+  const k = c => (keysDown.has(c) ? 1 : 0);
+  const boost = (k('ShiftLeft') || k('ShiftRight')) ? 1 : 0.25;
+  kb.x = (k('KeyD') - k('KeyA')) * boost;
+  kb.y = (k('KeyS') - k('KeyW')) * boost;
+  kb.z = (k('KeyQ') + k('KeyC') - k('KeyE') - k('Space')) * boost;
+  kb.rz = (k('ArrowRight') - k('ArrowLeft')) * 0.5;
+  kb.rx = (k('ArrowUp') - k('ArrowDown')) * 0.5;
+}
+
+function updateInputSources() {
+  const parts = ['キーボード'];
+  if (hidDevice) parts.unshift('SpaceMouse');
+  if (padConnected) parts.push('ゲームパッド');
+  document.getElementById('inputSources').textContent = parts.join(' + ');
+}
+
+// Ease pitch back to level. Set by a button, H, or gamepad A; cleared by
+// tick() once the view is level or the pitch stick is touched.
+let levelRequested = false;
 
 // ---- per-frame camera update: pure flight-stick integration, no pivot ----
 let lastTime = performance.now();
@@ -1558,6 +2056,13 @@ function setResolutionScale(v) {
   currentResolutionScale = next;
   viewer.resolutionScale = next;
   qualitySettle = 4;
+  viewer.scene.requestRender();
+}
+function setTerrainSSE(v) {
+  if (Math.abs(v - currentTerrainSSE) < 1e-4) return;
+  currentTerrainSSE = v;
+  viewer.scene.globe.maximumScreenSpaceError = v;
+  viewer.scene.requestRender();
 }
 // globe.getHeight() isn't free once real terrain tiles are involved. Even
 // throttled, calling it FROM the render loop (tick/rAF) still occasionally
@@ -1568,11 +2073,22 @@ function setResolutionScale(v) {
 // reads the last sampled value and smoothly eases toward it.
 let targetHeightAboveGround = 0;
 let smoothedHeightAboveGround = 0;
+const lastHeightSamplePos = new Cesium.Cartesian3(NaN, NaN, NaN);
 setInterval(() => {
-  const carto = Cesium.Cartographic.fromCartesian(viewer.camera.position);
+  // Parked camera, same answer: don't pay for the terrain query. (Tiles
+  // still sharpening underneath can shift it slightly, hence the refresh
+  // every few seconds regardless.)
+  const pos = viewer.camera.position;
+  const now = performance.now();
+  if (Cesium.Cartesian3.equalsEpsilon(pos, lastHeightSamplePos, 0, 1) &&
+      now - lastHeightSampleTime < 3000) return;
+  Cesium.Cartesian3.clone(pos, lastHeightSamplePos);
+  lastHeightSampleTime = now;
+  const carto = Cesium.Cartographic.fromCartesian(pos);
   const groundHeight = viewer.scene.globe.getHeight(carto) ?? 0;
   targetHeightAboveGround = Math.max(0, carto.height - groundHeight);
 }, 150);
+let lastHeightSampleTime = 0;
 
 function tick() {
   const now = performance.now();
@@ -1591,14 +2107,27 @@ function tick() {
   // tracking every tremor in the hand. tau is the time constant in seconds;
   // the exponential form makes the response identical regardless of frame
   // rate, which a plain per-frame lerp would not be.
+  // Every input device adds into the same stick, so they can be mixed
+  // freely (keyboard to climb while the SpaceMouse steers, say).
+  pollGamepad();
+  pollKeyboard();
+  const clamp1 = v => Math.max(-1, Math.min(1, v));
+  const tgt = {
+    x: clamp1(sm.x + pad.x + kb.x),
+    y: clamp1(sm.y + pad.y + kb.y),
+    z: clamp1(sm.z + pad.z + kb.z),
+    rx: clamp1(sm.rx + pad.rx + kb.rx),
+    ry: sm.ry,
+    rz: clamp1(sm.rz + pad.rz + kb.rz),
+  };
   const tau = settings.inputSmoothing;
   const k = tau > 0 ? 1 - Math.exp(-rawDt / tau) : 1;
-  smIn.x += (sm.x - smIn.x) * k;
-  smIn.y += (sm.y - smIn.y) * k;
-  smIn.z += (sm.z - smIn.z) * k;
-  smIn.rx += (sm.rx - smIn.rx) * k;
-  smIn.ry += (sm.ry - smIn.ry) * k;
-  smIn.rz += (sm.rz - smIn.rz) * k;
+  smIn.x += (tgt.x - smIn.x) * k;
+  smIn.y += (tgt.y - smIn.y) * k;
+  smIn.z += (tgt.z - smIn.z) * k;
+  smIn.rx += (tgt.rx - smIn.rx) * k;
+  smIn.ry += (tgt.ry - smIn.ry) * k;
+  smIn.rz += (tgt.rz - smIn.rz) * k;
 
   const cam = viewer.camera;
 
@@ -1636,6 +2165,15 @@ function tick() {
     pitchDelta *= remaining;
   }
   pitch = Cesium.Math.clamp(pitch + pitchDelta, -PITCH_LIMIT, PITCH_LIMIT);
+  // "Level the view": glide back to the horizon over about half a second.
+  // Touching the pitch axis cancels it, so it never fights the hand.
+  if (levelRequested) {
+    if (Math.abs(tgt.rx) > 0.05) levelRequested = false;
+    else {
+      pitch += (0 - pitch) * Math.min(1, dt * 6);
+      if (Math.abs(pitch) < Cesium.Math.toRadians(0.2)) { pitch = 0; levelRequested = false; }
+    }
+  }
 
   const enu = Cesium.Transforms.eastNorthUpToFixedFrame(cam.positionWC);
   const east = Cesium.Matrix4.getColumn(enu, 0, new Cesium.Cartesian3());
@@ -1683,13 +2221,7 @@ function tick() {
 
   cam.setView({ orientation: { direction, up } });
 
-  document.getElementById('alt').textContent =
-    `${carto.height.toFixed(0)} (地表から ${heightAboveGround.toFixed(0)})`;
   const curSpeed = settings.moveSpeed + heightAboveGround * settings.altFactor;
-  document.getElementById('speed').textContent =
-    (Math.hypot(smIn.x, smIn.y, smIn.z) * curSpeed).toFixed(1);
-  document.getElementById('rawvals').textContent =
-    `x=${sm.x.toFixed(2)} y=${sm.y.toFixed(2)} z=${sm.z.toFixed(2)} | rx=${sm.rx.toFixed(2)} ry=${sm.ry.toFixed(2)} rz=${sm.rz.toFixed(2)}`;
 
   // FPS (smoothed) tells us if rendering itself is the bottleneck; pending
   // tile requests tell us if we're instead waiting on network/tile loading.
@@ -1711,7 +2243,7 @@ function tick() {
   // smoothed value decays asymptotically, so it needs a threshold rather
   // than a test against exactly zero.
   const IDLE_EPS = 0.004;
-  const moving = Math.abs(smIn.x) > IDLE_EPS || Math.abs(smIn.y) > IDLE_EPS ||
+  const moving = levelRequested || Math.abs(smIn.x) > IDLE_EPS || Math.abs(smIn.y) > IDLE_EPS ||
                  Math.abs(smIn.z) > IDLE_EPS || Math.abs(smIn.rx) > IDLE_EPS ||
                  Math.abs(smIn.ry) > IDLE_EPS || Math.abs(smIn.rz) > IDLE_EPS;
   idleMs = moving ? 0 : idleMs + dt * 1000;
@@ -1742,8 +2274,6 @@ function tick() {
       slowFrameStreak = 0;
     }
   }
-  document.getElementById('fps').textContent = fpsSmoothed.toFixed(0);
-  document.getElementById('pendingTiles').textContent = Cesium.RequestScheduler.statistics.numberOfActiveRequests;
 
   // Twice a second, trade quality for framerate or claim it back.
   //
@@ -1769,14 +2299,12 @@ function tick() {
       if (currentResolutionScale < settings.maxResolutionScale) {
         setResolutionScale(currentResolutionScale + 0.05);
       } else if (currentTerrainSSE > settings.terrainDetail) {
-        currentTerrainSSE = Math.max(settings.terrainDetail, currentTerrainSSE - 0.5);
-        viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+        setTerrainSSE(Math.max(settings.terrainDetail, currentTerrainSSE - 0.5));
       }
     } else if (fpsSmoothed < floor) {
       const terrainSpent = currentTerrainSSE >= TERRAIN_SSE_WORST;
       if (!terrainSpent) {
-        currentTerrainSSE = Math.min(TERRAIN_SSE_WORST, currentTerrainSSE + 0.5 + 2 * deficit);
-        viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+        setTerrainSSE(Math.min(TERRAIN_SSE_WORST, currentTerrainSSE + 0.5 + 2 * deficit));
       }
       // Resolution is the last resort: only once terrain is exhausted, or
       // when we're missing by a wide margin and coarsening ground alone
@@ -1788,14 +2316,22 @@ function tick() {
       if (currentResolutionScale < settings.maxResolutionScale) {
         setResolutionScale(currentResolutionScale + 0.05);
       } else if (currentTerrainSSE > settings.terrainDetail) {
-        currentTerrainSSE = Math.max(settings.terrainDetail, currentTerrainSSE - 0.5);
-        viewer.scene.globe.maximumScreenSpaceError = currentTerrainSSE;
+        setTerrainSSE(Math.max(settings.terrainDetail, currentTerrainSSE - 0.5));
       }
     }
   }
-  document.getElementById('resScale').textContent =
-    `${Math.round(currentResolutionScale * 100)}% (${viewer.canvas.width}x${viewer.canvas.height})`;
-  document.getElementById('terrainSSE').textContent = currentTerrainSSE.toFixed(1);
+  // The readouts change every frame but nobody reads numbers at 30Hz, and
+  // each write re-lays-out the panel. Four times a second is plenty.
+  if (now - lastHudUpdate > 250) {
+    lastHudUpdate = now;
+    setHud('alt', `${carto.height.toFixed(0)} (地表から ${heightAboveGround.toFixed(0)})`);
+    setHud('speed', (Math.hypot(smIn.x, smIn.y, smIn.z) * curSpeed).toFixed(1));
+    setHud('rawvals', `x=${sm.x.toFixed(2)} y=${sm.y.toFixed(2)} z=${sm.z.toFixed(2)} | rx=${sm.rx.toFixed(2)} ry=${sm.ry.toFixed(2)} rz=${sm.rz.toFixed(2)}`);
+    setHud('fps', fpsSmoothed.toFixed(0));
+    setHud('pendingTiles', String(Cesium.RequestScheduler.statistics.numberOfActiveRequests));
+    setHud('resScale', `${Math.round(currentResolutionScale * 100)}% (${viewer.canvas.width}x${viewer.canvas.height})`);
+    setHud('terrainSSE', currentTerrainSSE.toFixed(1));
+  }
 
   // Heading (compass direction, 0=North matching our yaw convention) and
   // pitch (look up/down angle), for "which way am I facing" awareness.
@@ -1824,10 +2360,24 @@ function tick() {
     drawAttitude(Cesium.Math.toDegrees(pitch));
     updatePeakLabels();
     updateSkyCompass(carto);
+    minimapDirty = true;
+  }
+  // The minimap is a small, peripheral thing: ten redraws a second read as
+  // smooth there and halve its cost.
+  if (minimapDirty && now - lastMinimapDraw > 100) {
+    minimapDirty = false;
+    lastMinimapDraw = now;
     updateMinimap(carto, headingDeg);
   }
-
-  requestAnimationFrame(tick);
+}
+let lastHudUpdate = 0;
+let lastMinimapDraw = 0;
+const hudEls = {};
+const hudLast = {};
+function setHud(id, text) {
+  if (hudLast[id] === text) return;
+  hudLast[id] = text;
+  (hudEls[id] ||= document.getElementById(id)).textContent = text;
 }
 
 // ---- Graphical compass: fixed N-up dial, needle rotates to heading ----
@@ -1905,7 +2455,15 @@ function drawAttitude(pitchDeg) {
   ctx.textAlign = 'center';
   ctx.fillText(pitchDeg.toFixed(0) + '°', cx, h - 6);
 }
-requestAnimationFrame(tick);
+// tick() hangs off Cesium's render loop instead of running its own
+// requestAnimationFrame. Two loops meant the camera and every overlay were
+// updated at the display's 60Hz while Cesium only drew 30 of those frames --
+// half the work thrown away, and the camera moving between draws it would
+// never show. preUpdate fires once per loop iteration (at the FPS cap), even
+// on iterations where requestRenderMode decides nothing needs drawing, so
+// input is still read while parked; moving the camera here is itself what
+// makes Cesium draw the next frame.
+viewer.scene.preUpdate.addEventListener(tick);
 
 // ---- Startup gate.
 // The camera starts parked over Fuji, and for the first few seconds that view
@@ -2023,7 +2581,7 @@ function ensureMinimapTiles(centerTileX, centerTileY, zoom) {
       // Assigned to minimapBg immediately below (not on load) -- tiles draw
       // into it progressively as each finishes, so the map fills in instead
       // of staying blank until every one of the 9 is done.
-      img.onload = () => bgCtx.drawImage(img, dx * 256, dy * 256);
+      img.onload = () => { bgCtx.drawImage(img, dx * 256, dy * 256); minimapDirty = true; };
       // Plain OSM here rather than the OpenTopoMap used for the 3D globe:
       // at minimap size the topo shading/contours turn into visual noise,
       // while OSM's flat styling keeps roads, towns and coastline legible.
@@ -2039,8 +2597,10 @@ function lonLatToMinimapPx(lon, lat, zoom) {
   return [x, y];
 }
 
-// Minimap pins use the same combined list as the 3D labels.
-const MINIMAP_PINS = ALL_PEAKS;
+// Minimap pins use the same list as the 3D labels, except that the
+// thousands of lesser OSM peaks only appear once zoomed in far enough for
+// them not to carpet the map.
+const MINIMAP_MINOR_PEAK_ZOOM = 10;
 
 function drawMinimapPin(ctx, x, y) {
   ctx.beginPath();
@@ -2079,7 +2639,14 @@ function updateMinimap(carto, headingDeg) {
   // zooms dozens are in frame at once and labelling them all just produces
   // an unreadable pile of overlapping text.
   const visible = [];
-  for (const p of MINIMAP_PINS) {
+  // Cheap lon/lat box first, so the mercator maths only runs for peaks that
+  // can possibly be on the map.
+  const spanLon = w / 256 / Math.pow(2, zoom) * 360 * 0.6 + 0.01;
+  const spanLat = spanLon;  // generous: mercator stretches latitude, never shrinks it here
+  const showMinor = zoom >= MINIMAP_MINOR_PEAK_ZOOM;
+  for (const p of peakEntries) {
+    if (p.rank >= 400 && !showMinor) continue;
+    if (Math.abs(p.lon - lonDeg) > spanLon || Math.abs(p.lat - latDeg) > spanLat) continue;
     const [px, py] = lonLatToMinimapPx(p.lon, p.lat, zoom);
     const x = px - srcX, y = py - srcY;
     if (x < -10 || x > w + 10 || y < -10 || y > h + 10) continue;
