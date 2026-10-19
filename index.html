@@ -332,8 +332,8 @@
     <select id="s_imagery" style="width:100%; padding:4px;"></select>
   </div>
   <div class="row">
-    <label><span>遠景のかすみ</span><span id="v_fogDensity"></span></label>
-    <input type="range" id="s_fogDensity" min="0" max="2" step="0.05">
+    <label><span>見通せる距離 (かすみ)</span><span id="v_visibilityKm"></span></label>
+    <input type="range" id="s_visibilityKm" min="0" max="500" step="10">
   </div>
   <div class="row">
     <label><span>時刻 (JST)</span><span id="v_timeOfDay"></span></label>
@@ -475,17 +475,39 @@ viewer.scene.fog.minimumBrightness = 0.75;
 //    distance, so far ridges collapse into a smooth silhouette with no
 //    relief. Lower factor = distant terrain keeps its shape.
 viewer.scene.fog.screenSpaceErrorFactor = 1.0;
-// Haze strength, live-tunable. Cesium's default density (2.0e-4) is tuned
-// for a whole-globe view and is far too thick for looking across a hundred
-// km of mountains -- it buries exactly the distant ridges this app exists to
-// show. Dropping it to 0 turns haze off entirely, which is also the quickest
-// way to confirm whether fog is what's hiding a far peak.
-const FOG_DENSITY_BASE = 2.0e-4;
+// Haze, set as a VISIBILITY DISTANCE (v0.3.3). Cesium doesn't use
+// fog.density as-is: it multiplies it by a built-in table that thickens the
+// fog the lower the camera is. Measured: at ~2.7km up the per-metre density
+// came out near 7e-5, i.e. terrain fully hazed out by ~20-30km -- low over
+// the Boso peninsula, Fuji (100km) and the Alps simply vanished into a flat
+// band, and Cesium stops drawing tiles that are completely fogged. A
+// multiplier on that (v0.2-v0.3.2) can't fix it: whatever suits high
+// altitude is still far too thick low down.
+//
+// So aim at the density actually used, not the input to the table: after
+// every frame, read what Cesium applied and rescale fog.density so the next
+// frame lands on 1.5 / visibility. Cesium's fog factor is
+// 1 - exp(-(distance * density)^2), so at the visibility distance the haze
+// is ~90%, at half of it ~43%, and everything nearer stays clear. That holds
+// at any altitude. Visibility 0 turns haze off.
+function fogTarget() {
+  return settings.visibilityKm > 0 ? 1.5 / (settings.visibilityKm * 1000) : 0;
+}
 function applyFog() {
-  viewer.scene.fog.enabled = settings.fogDensity > 0;
-  viewer.scene.fog.density = FOG_DENSITY_BASE * settings.fogDensity;
+  viewer.scene.fog.enabled = settings.visibilityKm > 0;
   viewer.scene.requestRender();
 }
+viewer.scene.postRender.addEventListener(() => {
+  const target = fogTarget();
+  const actual = viewer.scene.frameState.fog.density;
+  if (!(target > 0) || !(actual > 0)) return;
+  const ratio = target / actual;
+  // Only move when it's meaningfully off, so a parked view doesn't keep
+  // nudging the value (and a single odd frame can't swing it wildly).
+  if (Math.abs(ratio - 1) > 0.02) {
+    viewer.scene.fog.density *= Cesium.Math.clamp(ratio, 0.1, 10);
+  }
+});
 
 // 3. With no imagery loaded that far out, whatever shows through is
 //    globe.baseColor -- dark by default. A pale haze tone means the worst
@@ -1538,7 +1560,7 @@ const DEFAULTS = {
   labelFarOpacity: 0.3,      // opacity of the most distant labels (0 = fade out)
   japanOnly: true,           // don't render globe outside Japan at all
   imagery: 'opentopo',       // surface texture, see IMAGERY_OPTIONS
-  fogDensity: 0.5,           // multiplier on Cesium's default haze; 0 = off
+  visibilityKm: 200,         // distance at which haze is ~90%; 0 = no haze (see applyFog)
   sunLighting: false,        // shade terrain by real sun position
   timeOfDay: 10,             // hours, JST, used when sunLighting is on
   // ---- v0.2: being a good neighbour to the rest of the machine ----
@@ -1559,9 +1581,9 @@ const DEFAULTS = {
 // writes ordinary settings, so everything stays individually adjustable
 // afterwards.
 const QUALITY_PRESETS = {
-  light:    { maxResolutionScale: 0.5,  terrainDetail: 2.0, fpsCap: 24, skyAtmosphere: false, antiAlias: false, fogDensity: 0.5 },
-  standard: { maxResolutionScale: 0.65, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: false, antiAlias: false, fogDensity: 0.5 },
-  high:     { maxResolutionScale: 1.0,  terrainDetail: 1.0, fpsCap: 60, skyAtmosphere: true,  antiAlias: true,  fogDensity: 0.7 },
+  light:    { maxResolutionScale: 0.5,  terrainDetail: 2.0, fpsCap: 24, skyAtmosphere: false, antiAlias: false, visibilityKm: 150 },
+  standard: { maxResolutionScale: 0.65, terrainDetail: 1.0, fpsCap: 30, skyAtmosphere: false, antiAlias: false, visibilityKm: 200 },
+  high:     { maxResolutionScale: 1.0,  terrainDetail: 1.0, fpsCap: 60, skyAtmosphere: true,  antiAlias: true,  visibilityKm: 250 },
 };
 let settings = { ...DEFAULTS };
 try {
@@ -1577,6 +1599,7 @@ try {
   // UI, so the old value would otherwise pin every existing install to it.
   delete settings.maxTileRequests;
   delete settings.altFactor;           // superseded by relSpeed (v0.3.2)
+  delete settings.fogDensity;          // superseded by visibilityKm (v0.3.3)
 } catch (e) { /* ignore corrupt storage */ }
 
 function saveSettings() {
@@ -1627,7 +1650,7 @@ const SLIDER_DEFS = [
   { key: 'inputSmoothing', slider: 's_inputSmoothing', value: 'v_inputSmoothing', fmt: v => v === 0 ? 'なし' : v.toFixed(2) + ' 秒' },
   { key: 'maxLabels', slider: 's_maxLabels', value: 'v_maxLabels', fmt: v => v.toFixed(0) + ' 個' },
   { key: 'labelSpacing', slider: 's_labelSpacing', value: 'v_labelSpacing', fmt: v => v.toFixed(0) + ' px' },
-  { key: 'fogDensity', slider: 's_fogDensity', value: 'v_fogDensity', fmt: v => v === 0 ? 'なし' : v.toFixed(2) },
+  { key: 'visibilityKm', slider: 's_visibilityKm', value: 'v_visibilityKm', fmt: v => v === 0 ? 'かすみなし' : v.toFixed(0) + ' km' },
   { key: 'timeOfDay', slider: 's_timeOfDay', value: 'v_timeOfDay', fmt: v => {
       const hh = Math.floor(v), mm = Math.round((v - hh) * 60);
       return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
@@ -1894,7 +1917,7 @@ document.getElementById('c_pauseWhenUnfocused').addEventListener('change', (e) =
   saveSettings();
   applyFocusState();
 });
-document.getElementById('s_fogDensity').addEventListener('input', applyFog);
+document.getElementById('s_visibilityKm').addEventListener('input', applyFog);
 document.getElementById('s_terrainDetail').addEventListener('input', () => {
   // Apply immediately rather than waiting for the adaptive loop to walk
   // there, so dragging the slider shows its effect right away.
