@@ -284,6 +284,10 @@
     <input type="range" id="s_relSpeed" min="0.2" max="6" step="0.1">
   </div>
   <div class="row">
+    <label><span>強く押したときの加速</span><span id="v_pushBoost"></span></label>
+    <input type="range" id="s_pushBoost" min="0" max="8" step="0.5">
+  </div>
+  <div class="row">
     <label><span>押し続けたときの加速</span><span id="v_cruiseBoost"></span></label>
     <input type="range" id="s_cruiseBoost" min="1" max="6" step="0.5">
   </div>
@@ -1584,6 +1588,8 @@ const DEFAULTS = {
   // reaching this multiple after another 3s; letting go resets it. For
   // crossing between ranges without having to climb first.
   cruiseBoost: 3,
+  // How much harder pushes are rewarded: speed x (1 + pushBoost * push^2).
+  pushBoost: 3,
   rotSpeed: 1.2,      // rad/s at full deflection
   deadzone: 0.06,
   maxResolutionScale: 0.65,  // ceiling for the adaptive resolution scaler below
@@ -1676,6 +1682,7 @@ const SLIDER_DEFS = [
   { key: 'moveSpeed', slider: 's_moveSpeed', value: 'v_moveSpeed', fmt: v => v.toFixed(0) + ' m/s' },
   { key: 'relSpeed', slider: 's_relSpeed', value: 'v_relSpeed', fmt: v => `地表高度×${v.toFixed(1)} /秒` },
   { key: 'cruiseBoost', slider: 's_cruiseBoost', value: 'v_cruiseBoost', fmt: v => v <= 1 ? 'なし' : `最大 ×${v.toFixed(1)}` },
+  { key: 'pushBoost', slider: 's_pushBoost', value: 'v_pushBoost', fmt: v => v === 0 ? 'なし (比例)' : `目いっぱいで ×${(1 + v).toFixed(1)}` },
   { key: 'rotSpeed',  slider: 's_rotSpeed',  value: 'v_rotSpeed',  fmt: v => v.toFixed(2) },
   { key: 'deadzone',  slider: 's_deadzone',  value: 'v_deadzone',  fmt: v => v.toFixed(2) },
   { key: 'maxResolutionScale', slider: 's_maxResolutionScale', value: 'v_maxResolutionScale', fmt: v => Math.round(v * 100) + '%' },
@@ -2681,11 +2688,17 @@ function tick() {
   if (Math.hypot(tgt.x, tgt.y, tgt.z) > 0.12) cruiseHeld += rawDt;
   else cruiseHeld = 0;
   const cruiseFactor = 1 + (settings.cruiseBoost - 1) * Cesium.Math.clamp((cruiseHeld - 1) / 3, 0, 1);
+  // Push harder, go disproportionately faster (v0.3.9): speed x
+  // (1 + pushBoost * m^2), m = how far the cap is pushed. Light pushes stay
+  // almost linear for fine control (k=3: x1.3 at 30%), a firm push opens up
+  // (x3 at 80%, x4 at full).
+  const pushMag = Math.min(1, Math.hypot(smIn.x, smIn.y, smIn.z));
+  const pushBoost = 1 + settings.pushBoost * pushMag * pushMag;
   if (smIn.x || smIn.y || smIn.z) {
     // heightAboveGround computed once at the top of tick() (not sea-level
     // altitude) -- matters near mountains, e.g. hovering just above Fuji's
     // ~3776m peak should feel like being near the ground and slow down.
-    const speed = (settings.moveSpeed + heightAboveGround * settings.relSpeed) * cruiseFactor;
+    const speed = (settings.moveSpeed + heightAboveGround * settings.relSpeed) * cruiseFactor * pushBoost;
     const delta = new Cesium.Cartesian3();
     Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(worldRight, smIn.x * speed * dt, new Cesium.Cartesian3()), delta);
     Cesium.Cartesian3.add(delta, Cesium.Cartesian3.multiplyByScalar(zenith, -smIn.z * speed * dt, new Cesium.Cartesian3()), delta);
@@ -2704,7 +2717,7 @@ function tick() {
 
   cam.setView({ orientation: { direction, up } });
 
-  const curSpeed = (settings.moveSpeed + heightAboveGround * settings.relSpeed) * cruiseFactor;
+  const curSpeed = (settings.moveSpeed + heightAboveGround * settings.relSpeed) * cruiseFactor * pushBoost;
 
   // FPS (smoothed) tells us if rendering itself is the bottleneck; pending
   // tile requests tell us if we're instead waiting on network/tile loading.
