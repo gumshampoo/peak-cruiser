@@ -513,8 +513,22 @@ viewer.scene.fog.screenSpaceErrorFactor = 1.0;
 // 1 - exp(-(distance * density)^2), so at the visibility distance the haze
 // is ~90%, at half of it ~43%, and everything nearer stays clear. That holds
 // at any altitude. Visibility 0 turns haze off.
+// v0.3.10: thinner from above. Real haze sits in the lowest couple of km;
+// a line of sight from high up crosses only a thin slice of it, so a single
+// sea-level visibility buried the ground under a wall of haze once the
+// camera climbed (at 50km up, everything below is beyond 50km away). The
+// average density along a path from height h down to the ground, for haze
+// thinning exponentially with scale height H, is (H/h)(1 - e^(-h/H)) of the
+// sea-level value: 1 at the ground, ~0.6 at 2km, ~0.37 at 5km, ~0.1 at 20km.
+const HAZE_SCALE_HEIGHT = 2000;   // m
+function hazeAltitudeFactor(h) {
+  const x = Math.max(0, h) / HAZE_SCALE_HEIGHT;
+  return x < 1e-3 ? 1 : (1 - Math.exp(-x)) / x;
+}
 function fogTarget() {
-  return settings.visibilityKm > 0 ? 1.5 / (settings.visibilityKm * 1000) : 0;
+  if (!(settings.visibilityKm > 0)) return 0;
+  const h = viewer.camera.positionCartographic.height;
+  return 1.5 / (settings.visibilityKm * 1000) * hazeAltitudeFactor(h);
 }
 function applyFog() {
   viewer.scene.fog.enabled = settings.visibilityKm > 0;
